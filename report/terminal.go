@@ -28,8 +28,18 @@ func PrintHeader(p *profile.Profile, path string) {
 	fmt.Printf("  Path      : %s\n", path)
 	fmt.Printf("  Workers   : %d\n", p.Workers)
 	fmt.Printf("  Duration  : %s\n", p.Duration.Round(time.Second))
-	fmt.Printf("  Files     : %d × %s\n", p.Files.Count, humanBytes(p.Files.SizeBytes))
+	fmt.Printf("  Files     : %d × %s  (total %s)\n",
+		p.Files.Count, humanBytes(p.Files.SizeBytes),
+		humanBytes(p.Files.SizeBytes*int64(p.Files.Count)))
 	fmt.Printf("  Block I/O : %s\n", humanBytes(p.BlockSize))
+	dioLabel := colGray + "no (page cache active)" + colReset
+	if p.DirectIO {
+		dioLabel = colGreen + "yes (O_DIRECT — page cache bypassed)" + colReset
+	}
+	fmt.Printf("  Direct I/O: %s\n", dioLabel)
+	if p.ComputeGapMs > 0 {
+		fmt.Printf("  Compute gap: %dms per batch (GPU simulation)\n", p.ComputeGapMs)
+	}
 	fmt.Printf("%s%s%s\n", colGray, strings.Repeat("─", 60), colReset)
 	fmt.Println()
 }
@@ -106,6 +116,21 @@ func PrintResult(r *workload.Result) {
 				warmLabel,
 			)
 		}
+	}
+
+	// ── GPU stall fraction ──────────────────────────────────────────
+	if r.GPUStallPct > 0 {
+		fmt.Printf("\n  %sGPU Stall Fraction%s  (I/O time ÷ (I/O + compute))\n", colBold, colReset)
+		stallColor := colGreen
+		verdict := "storage keeps up — not the bottleneck"
+		if r.GPUStallPct > 30 {
+			stallColor = colRed
+			verdict = "significant training bottleneck"
+		} else if r.GPUStallPct > 10 {
+			stallColor = colYellow
+			verdict = "measurable latency added to training"
+		}
+		fmt.Printf("    %s%.1f%%%s  — %s\n", stallColor, r.GPUStallPct, colReset, verdict)
 	}
 
 	// ── Target violations ───────────────────────────────────────────

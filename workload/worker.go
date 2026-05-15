@@ -12,72 +12,71 @@ import (
 	"github.com/minio/pulsar/profile"
 )
 
-// worker is the per-goroutine I/O loop.
 type worker struct {
-	kind     string
-	files    []string
-	p        *profile.Profile
-	id       int
-	rng      *rand.Rand
-	buf      []byte
+	kind  string
+	files []string
+	p     *profile.Profile
+	id    int
+	rng   *rand.Rand
+	buf   []byte
 }
 
 func newWorker(kind string, files []string, p *profile.Profile, id int, rng *rand.Rand) *worker {
+	sz := int(alignedBlockSize(p.BlockSize))
 	return &worker{
 		kind:  kind,
 		files: files,
 		p:     p,
 		id:    id,
 		rng:   rng,
-		buf:   make([]byte, p.BlockSize),
+		buf:   makeAlignedBuf(sz),
 	}
 }
 
-// Run is the hot loop. It calls the appropriate I/O pattern until ctx is cancelled.
 func (w *worker) Run(
 	ctx context.Context,
 	tp *measure.Throughput,
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
+	stall *measure.StallTracker,
 ) {
 	switch w.kind {
-	case "sequential-read":
-		w.loopSequentialRead(ctx, tp, ttfb, opLat)
+	case "sequential-read", "multi-epoch":
+		w.loopSequentialRead(ctx, tp, ttfb, opLat, stall)
 	case "random-read":
-		w.loopRandomRead(ctx, tp, ttfb, opLat)
+		w.loopRandomRead(ctx, tp, ttfb, opLat, stall)
 	case "write":
-		w.loopWrite(ctx, tp, ttfb, opLat)
+		w.loopWrite(ctx, tp, ttfb, opLat, stall)
 	case "mixed":
-		w.loopMixed(ctx, tp, ttfb, opLat)
+		w.loopMixed(ctx, tp, ttfb, opLat, stall)
 	case "agent-workspace":
-		w.loopAgentWorkspace(ctx, tp, ttfb, opLat)
-	case "multi-epoch":
-		w.loopSequentialRead(ctx, tp, ttfb, opLat) // epoch driver in runner
+		w.loopAgentWorkspace(ctx, tp, ttfb, opLat, stall)
 	}
 }
 
-// loopSequentialRead reads files sequentially from start to end.
-// Each call to a file measures TTFB (time to first block).
+// loopSequentialRead — primary training data loading pattern.
+// Each worker owns a shard and reads it start-to-end, measures TTFB on
+// every open(), then sleeps the compute gap to simulate GPU processing.
 func (w *worker) loopSequentialRead(
 	ctx context.Context,
 	tp *measure.Throughput,
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
+	stall *measure.StallTracker,
 ) {
-	idx := w.id % len(w.files) // each worker owns a shard
+	idx := w.id % len(w.files)
 	for ctx.Err() == nil {
 		path := w.files[idx]
 		t0 := time.Now()
-		f, err := os.Open(path)
+		f, err := openForRead(path, w.p.DirectIO)
 		if err != nil {
 			continue
 		}
-
-		// TTFB = time to first block
 		firstRead := true
 		for ctx.Err() == nil {
 			opStart := time.Now()
 			n, err := f.Read(w.buf)
+			ioElapsed := time.Since(opStart)
 			if n > 0 {
 				if firstRead {
 					if ttfb != nil {
@@ -89,7 +88,10 @@ func (w *worker) loopSequentialRead(
 					tp.AddRead(int64(n))
 				}
 				if opLat != nil {
-					opLat.Record(time.Since(opStart))
+					opLat.Record(ioElapsed)
+				}
+				if stall != nil {
+					stall.AddIO(ioElapsed)
 				}
 			}
 			if err == io.EOF || err != nil {
@@ -97,8 +99,7 @@ func (w *worker) loopSequentialRead(
 			}
 		}
 		f.Close()
-
-		// Advance to next file; wrap around (re-read = warm cache scenario)
+		w.computeGap(stall)
 		if w.p.Reuse {
 			idx = (idx + 1) % len(w.files)
 		} else {
@@ -107,13 +108,14 @@ func (w *worker) loopSequentialRead(
 	}
 }
 
-// loopRandomRead seeks to random offsets within files.
-// Exercises random-access path — important for mmap-style access.
+// loopRandomRead — cache thrash pattern.
+// Random file, random aligned offset every read — maximum eviction pressure.
 func (w *worker) loopRandomRead(
 	ctx context.Context,
 	tp *measure.Throughput,
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
+	stall *measure.StallTracker,
 ) {
 	for ctx.Err() == nil {
 		path := w.files[w.rng.Intn(len(w.files))]
@@ -125,10 +127,10 @@ func (w *worker) loopRandomRead(
 		if maxOff <= 0 {
 			maxOff = 0
 		}
-		offset := w.rng.Int63n(maxOff + 1)
+		offset := alignedOffset(w.rng.Int63n(maxOff + 1))
 
 		t0 := time.Now()
-		f, err := os.Open(path)
+		f, err := openForRead(path, w.p.DirectIO)
 		if err != nil {
 			continue
 		}
@@ -138,6 +140,7 @@ func (w *worker) loopRandomRead(
 		}
 		opStart := time.Now()
 		n, _ := f.Read(w.buf)
+		ioElapsed := time.Since(opStart)
 		f.Close()
 
 		if n > 0 {
@@ -145,37 +148,43 @@ func (w *worker) loopRandomRead(
 				ttfb.RecordTTFB(time.Since(t0))
 			}
 			if opLat != nil {
-				opLat.Record(time.Since(opStart))
+				opLat.Record(ioElapsed)
 			}
 			if tp != nil {
 				tp.AddRead(int64(n))
 			}
+			if stall != nil {
+				stall.AddIO(ioElapsed)
+			}
 		}
+		w.computeGap(stall)
 	}
 }
 
-// loopWrite writes files sequentially and optionally fsyncs.
+// loopWrite — checkpoint save pattern.
+// Writes a full file sequentially, fsyncs if configured, then compute gap.
 func (w *worker) loopWrite(
 	ctx context.Context,
 	tp *measure.Throughput,
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
+	stall *measure.StallTracker,
 ) {
 	idx := w.id % len(w.files)
 	for ctx.Err() == nil {
 		path := w.files[idx]
 		t0 := time.Now()
-		f, err := os.Create(path)
+		f, err := openForWrite(path, w.p.DirectIO)
 		if err != nil {
 			continue
 		}
-
 		remaining := w.p.Files.SizeBytes
 		firstWrite := true
 		for remaining > 0 && ctx.Err() == nil {
 			n := min64(int64(len(w.buf)), remaining)
 			opStart := time.Now()
 			written, err := f.Write(w.buf[:n])
+			ioElapsed := time.Since(opStart)
 			if written > 0 {
 				if firstWrite {
 					if ttfb != nil {
@@ -187,7 +196,10 @@ func (w *worker) loopWrite(
 					tp.AddWrite(int64(written))
 				}
 				if opLat != nil {
-					opLat.Record(time.Since(opStart))
+					opLat.Record(ioElapsed)
+				}
+				if stall != nil {
+					stall.AddIO(ioElapsed)
 				}
 				remaining -= int64(written)
 			}
@@ -196,129 +208,152 @@ func (w *worker) loopWrite(
 			}
 		}
 		if w.p.FsyncOnWrite {
+			fsyncStart := time.Now()
 			f.Sync()
+			if stall != nil {
+				stall.AddIO(time.Since(fsyncStart))
+			}
 		}
 		f.Close()
+		w.computeGap(stall)
 		idx = (idx + 1) % len(w.files)
 	}
 }
 
-// loopMixed interleaves reads and writes according to ReadPct/WritePct.
+// loopMixed — configurable read/write ratio.
 func (w *worker) loopMixed(
 	ctx context.Context,
 	tp *measure.Throughput,
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
+	stall *measure.StallTracker,
 ) {
 	for ctx.Err() == nil {
+		var ioElapsed time.Duration
 		if w.rng.Intn(100) < w.p.ReadPct {
-			w.doSingleRead(tp, ttfb, opLat)
+			ioElapsed = w.doSingleRead(tp, ttfb, opLat)
 		} else {
-			w.doSingleWrite(tp, opLat)
+			ioElapsed = w.doSingleWrite(tp, opLat)
 		}
+		if stall != nil {
+			stall.AddIO(ioElapsed)
+		}
+		w.computeGap(stall)
 	}
 }
 
-// loopAgentWorkspace simulates AI agent file editing patterns:
-// stat → open → read (partial) → write (partial) → rename → fsync
+// loopAgentWorkspace — AI coding agent pattern.
+// stat (40%) / read (20%) / write (20%) / rename (10%) / readdir (10%)
 func (w *worker) loopAgentWorkspace(
 	ctx context.Context,
 	tp *measure.Throughput,
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
+	stall *measure.StallTracker,
 ) {
 	dir := filepath.Dir(w.files[0])
 	for ctx.Err() == nil {
+		var ioElapsed time.Duration
 		roll := w.rng.Intn(100)
 		switch {
 		case roll < 40:
-			// stat() — most common agent operation
 			path := w.files[w.rng.Intn(len(w.files))]
 			t0 := time.Now()
 			os.Stat(path)
+			ioElapsed = time.Since(t0)
 			if opLat != nil {
-				opLat.Record(time.Since(t0))
+				opLat.Record(ioElapsed)
 			}
 		case roll < 60:
-			// partial read (agent reads a source file)
-			w.doSingleRead(tp, ttfb, opLat)
+			ioElapsed = w.doSingleRead(tp, ttfb, opLat)
 		case roll < 80:
-			// partial write + fsync (agent edits a file)
-			w.doSingleWrite(tp, opLat)
+			ioElapsed = w.doSingleWrite(tp, opLat)
 		case roll < 90:
-			// rename (agent saves a temp file atomically)
 			src := w.files[w.rng.Intn(len(w.files))]
 			dst := filepath.Join(dir, "tmp-rename.bin")
+			t0 := time.Now()
 			os.Rename(src, dst)
-			os.Rename(dst, src) // restore
+			os.Rename(dst, src)
+			ioElapsed = time.Since(t0)
 		default:
-			// readdir (agent scans directory)
 			t0 := time.Now()
 			f, err := os.Open(dir)
 			if err == nil {
 				f.ReadDir(-1)
 				f.Close()
 			}
+			ioElapsed = time.Since(t0)
 			if opLat != nil {
-				opLat.Record(time.Since(t0))
+				opLat.Record(ioElapsed)
 			}
 		}
+		if stall != nil {
+			stall.AddIO(ioElapsed)
+		}
+		w.computeGap(stall)
 	}
 }
 
-func (w *worker) doSingleRead(
-	tp *measure.Throughput,
-	ttfb *measure.Recorder,
-	opLat *measure.Recorder,
-) {
+// computeGap sleeps to simulate GPU processing time between I/O bursts.
+// Records sleep time as productive (non-stall) for GPU stall calculation.
+func (w *worker) computeGap(stall *measure.StallTracker) {
+	if w.p.ComputeGapMs <= 0 || stall == nil {
+		return
+	}
+	t0 := time.Now()
+	time.Sleep(time.Duration(w.p.ComputeGapMs) * time.Millisecond)
+	stall.AddCompute(time.Since(t0))
+}
+
+func (w *worker) doSingleRead(tp *measure.Throughput, ttfb *measure.Recorder, opLat *measure.Recorder) time.Duration {
 	path := w.files[w.rng.Intn(len(w.files))]
 	t0 := time.Now()
-	f, err := os.Open(path)
+	f, err := openForRead(path, w.p.DirectIO)
 	if err != nil {
-		return
+		return 0
 	}
 	opStart := time.Now()
 	n, _ := f.Read(w.buf)
+	ioElapsed := time.Since(opStart)
 	f.Close()
 	if n > 0 {
 		if ttfb != nil {
 			ttfb.RecordTTFB(time.Since(t0))
 		}
 		if opLat != nil {
-			opLat.Record(time.Since(opStart))
+			opLat.Record(ioElapsed)
 		}
 		if tp != nil {
 			tp.AddRead(int64(n))
 		}
 	}
+	return ioElapsed
 }
 
-func (w *worker) doSingleWrite(
-	tp *measure.Throughput,
-	opLat *measure.Recorder,
-) {
+func (w *worker) doSingleWrite(tp *measure.Throughput, opLat *measure.Recorder) time.Duration {
 	path := w.files[w.rng.Intn(len(w.files))]
-	f, err := os.OpenFile(path, os.O_WRONLY, 0644)
+	f, err := openForWrite(path, w.p.DirectIO)
 	if err != nil {
-		return
+		return 0
 	}
 	opStart := time.Now()
 	n, _ := f.Write(w.buf)
 	if w.p.FsyncOnWrite {
 		f.Sync()
 	}
+	ioElapsed := time.Since(opStart)
 	f.Close()
 	if n > 0 {
 		if opLat != nil {
-			opLat.Record(time.Since(opStart))
+			opLat.Record(ioElapsed)
 		}
 		if tp != nil {
 			tp.AddWrite(int64(n))
 		}
 	}
+	return ioElapsed
 }
 
-// runMetadataWorker runs stat/readdir ops and records latency.
 func runMetadataWorker(
 	ctx context.Context,
 	files []string,
@@ -331,12 +366,12 @@ func runMetadataWorker(
 	}
 	dir := filepath.Dir(files[0])
 	for ctx.Err() == nil {
-		if rng.Intn(10) < 8 { // 80% stat
+		if rng.Intn(10) < 8 {
 			path := files[rng.Intn(len(files))]
 			t0 := time.Now()
 			os.Stat(path)
 			statRec.Record(time.Since(t0))
-		} else { // 20% readdir
+		} else {
 			t0 := time.Now()
 			f, err := os.Open(dir)
 			if err == nil {

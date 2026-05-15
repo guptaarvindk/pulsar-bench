@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -117,4 +118,49 @@ func stddev(s []float64) float64 {
 		sum += d * d
 	}
 	return math.Sqrt(sum / float64(len(s)-1))
+}
+
+// ------------------------------------------------------------------ #
+// StallTracker — GPU stall fraction
+// ------------------------------------------------------------------ #
+
+// StallTracker accumulates time spent in I/O (stalled) vs time spent in
+// the simulated compute gap (productive). Workers call AddIO and AddCompute
+// on every iteration. StallPct() returns the I/O fraction as a percentage.
+//
+// Interpretation (only meaningful when ComputeGapMs > 0):
+//
+//	 0–10%  storage keeps up — not the bottleneck
+//	10–30%  storage adds measurable latency to training
+//	  >30%  storage is a significant training bottleneck
+type StallTracker struct {
+	ioNs      atomic.Int64
+	computeNs atomic.Int64
+}
+
+func (s *StallTracker) AddIO(d time.Duration) {
+	if s != nil {
+		s.ioNs.Add(d.Nanoseconds())
+	}
+}
+
+func (s *StallTracker) AddCompute(d time.Duration) {
+	if s != nil {
+		s.computeNs.Add(d.Nanoseconds())
+	}
+}
+
+// StallPct returns the percentage of total time spent blocked on I/O.
+// Returns 0 when no compute gap is configured (no compute time recorded).
+func (s *StallTracker) StallPct() float64 {
+	if s == nil {
+		return 0
+	}
+	io := s.ioNs.Load()
+	compute := s.computeNs.Load()
+	total := io + compute
+	if total == 0 || compute == 0 {
+		return 0 // no compute gap configured — metric is meaningless
+	}
+	return float64(io) / float64(total) * 100.0
 }

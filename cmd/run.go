@@ -14,17 +14,20 @@ import (
 )
 
 var (
-	flagPath       string
-	flagProfile    string
-	flagWorkers    int
-	flagDuration   time.Duration
-	flagWarmup     time.Duration
-	flagFileSize   string
-	flagFileCount  int
-	flagOutputJSON string
-	flagNoCleanup  bool
-	flagSeed       int64
-	flagQuiet      bool
+	flagPath        string
+	flagProfile     string
+	flagWorkers     int
+	flagDuration    time.Duration
+	flagWarmup      time.Duration
+	flagFileSize    string
+	flagFileCount   int
+	flagOutputJSON  string
+	flagNoCleanup   bool
+	flagSeed        int64
+	flagQuiet       bool
+	flagComputeGap  int
+	flagDirectIO    bool
+	flagNoDirectIO  bool
 )
 
 var runCmd = &cobra.Command{
@@ -82,6 +85,15 @@ var runCmd = &cobra.Command{
 		if flagSeed != 0 {
 			p.Seed = flagSeed
 		}
+		if cmd.Flags().Changed("compute-gap") {
+			p.ComputeGapMs = flagComputeGap
+		}
+		if flagDirectIO {
+			p.DirectIO = true
+		}
+		if flagNoDirectIO {
+			p.DirectIO = false
+		}
 
 		// Validate target path
 		path, err := filepath.Abs(flagPath)
@@ -137,5 +149,8 @@ func init() {
 	runCmd.Flags().BoolVar(&flagNoCleanup, "no-cleanup", false, "Keep test files after run (useful for repeated runs)")
 	runCmd.Flags().Int64Var(&flagSeed, "seed", 0, "Random seed for reproducible runs")
 	runCmd.Flags().BoolVar(&flagQuiet, "quiet", false, "Suppress terminal output (use with --json)")
+	runCmd.Flags().IntVar(&flagComputeGap, "compute-gap", 0, "Simulated GPU compute time between I/O ops in ms (0=disable, enables GPU stall metric)")
+	runCmd.Flags().BoolVar(&flagDirectIO, "direct-io", false, "Force O_DIRECT to bypass page cache (Linux only)")
+	runCmd.Flags().BoolVar(&flagNoDirectIO, "no-direct-io", false, "Disable O_DIRECT even if the profile enables it")
 	_ = runCmd.MarkFlagRequired("path")
 }

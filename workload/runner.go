@@ -22,6 +22,7 @@ type Result struct {
 	WorkloadType string                `json:"workload_type"`
 	Path         string                `json:"path"`
 	Workers      int                   `json:"workers"`
+	DirectIO     bool                  `json:"direct_io"`
 	DurationS    float64               `json:"duration_s"`
 	StartedAt    time.Time             `json:"started_at"`
 	FinishedAt   time.Time             `json:"finished_at"`
@@ -31,6 +32,14 @@ type Result struct {
 	OpLatency    measure.LatencyStats    `json:"op_latency"`
 	Metadata     *MetadataStats          `json:"metadata,omitempty"`
 	Epochs       []EpochStats            `json:"epochs,omitempty"`
+
+	// GPUStallPct is the fraction of wall time workers spent blocked on I/O
+	// rather than in the simulated compute gap. Only meaningful when
+	// ComputeGapMs > 0. Interpretation:
+	//   0–10%  → storage keeps up with GPU; not the bottleneck
+	//  10–30%  → storage is adding measurable latency to training
+	//   >30%   → storage is a significant training bottleneck
+	GPUStallPct  float64               `json:"gpu_stall_pct"`
 
 	Targets      profile.TargetConfig    `json:"targets"`
 	Violations   []string                `json:"violations"`
@@ -79,6 +88,7 @@ func (r *Runner) Run() (*Result, error) {
 		WorkloadType: r.p.Workload,
 		Path:         r.path,
 		Workers:      r.p.Workers,
+		DirectIO:     r.p.DirectIO,
 		StartedAt:    time.Now(),
 		Targets:      r.p.Targets,
 	}
@@ -103,7 +113,7 @@ func (r *Runner) Run() (*Result, error) {
 			fmt.Printf("  → Warming up for %s …\n", r.p.Warmup.Round(time.Second))
 		}
 		warmupCtx, cancel := context.WithTimeout(context.Background(), r.p.Warmup)
-		r.runWorkers(warmupCtx, nil, nil, nil) // discard warmup metrics
+		r.runWorkers(warmupCtx, nil, nil, nil, nil) // discard warmup metrics
 		cancel()
 	}
 
@@ -116,6 +126,7 @@ func (r *Runner) Run() (*Result, error) {
 	throughput := measure.NewThroughput()
 	ttfb := &measure.Recorder{}
 	opLat := &measure.Recorder{}
+	stall := &measure.StallTracker{}
 
 	measCtx, measCancel := context.WithTimeout(context.Background(), r.p.Duration)
 	defer measCancel()
@@ -123,7 +134,6 @@ func (r *Runner) Run() (*Result, error) {
 	switch r.p.Workload {
 	case "multi-epoch":
 		result.Epochs = r.runEpochs(measCtx)
-		// Use last epoch stats as primary
 		if len(result.Epochs) > 0 {
 			last := result.Epochs[len(result.Epochs)-1]
 			result.Throughput = last.Throughput
@@ -134,10 +144,11 @@ func (r *Runner) Run() (*Result, error) {
 		result.Metadata = ms
 		result.Throughput = throughput.Stats(r.p.Duration)
 	default:
-		r.runWorkers(measCtx, throughput, ttfb, opLat)
+		r.runWorkers(measCtx, throughput, ttfb, opLat, stall)
 		result.Throughput = throughput.Stats(r.p.Duration)
 		result.TTFB = ttfb.Stats()
 		result.OpLatency = opLat.Stats()
+		result.GPUStallPct = stall.StallPct()
 	}
 
 	result.FinishedAt = time.Now()
@@ -154,6 +165,7 @@ func (r *Runner) runWorkers(
 	tp *measure.Throughput,
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
+	stall *measure.StallTracker,
 ) {
 	var wg sync.WaitGroup
 	for i := 0; i < r.p.Workers; i++ {
@@ -163,7 +175,7 @@ func (r *Runner) runWorkers(
 			defer wg.Done()
 			workerRng := rand.New(rand.NewSource(r.rng.Int63()))
 			w := newWorker(r.p.Workload, r.files, r.p, workerID, workerRng)
-			w.Run(ctx, tp, ttfb, opLat)
+			w.Run(ctx, tp, ttfb, opLat, stall)
 		}()
 	}
 	wg.Wait()
@@ -181,7 +193,7 @@ func (r *Runner) runEpochs(ctx context.Context) []EpochStats {
 		opLat := &measure.Recorder{}
 		epochDur := r.p.Duration / time.Duration(r.p.Epochs)
 		eCtx, cancel := context.WithTimeout(ctx, epochDur)
-		r.runWorkers(eCtx, tp, ttfb, opLat)
+		r.runWorkers(eCtx, tp, ttfb, opLat, &measure.StallTracker{})
 		cancel()
 		epochs = append(epochs, EpochStats{
 			Epoch:      e + 1,

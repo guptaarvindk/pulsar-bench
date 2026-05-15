@@ -44,8 +44,16 @@ type Profile struct {
 
 	// I/O knobs
 	BlockSize    int64 `yaml:"block_size"`    // bytes per read/write syscall
-	DirectIO     bool  `yaml:"direct_io"`     // O_DIRECT (Linux only; skipped on macOS)
-	FsyncOnWrite bool  `yaml:"fsync_on_write"` // fsync() after every write
+	DirectIO     bool  `yaml:"direct_io"`      // O_DIRECT (Linux only; silently ignored on macOS)
+	FsyncOnWrite bool  `yaml:"fsync_on_write"`  // fsync() after every write
+
+	// ComputeGapMs simulates GPU processing time between I/O bursts.
+	// After reading one file (or one pass), each worker sleeps this many
+	// milliseconds before issuing the next read. This models the real
+	// DataLoader pattern: read a batch → GPU processes it → read next batch.
+	// Set to 0 (default) for maximum I/O pressure (pure storage stress test).
+	// Set to ~50–200ms to simulate typical GPU compute time per batch.
+	ComputeGapMs int `yaml:"compute_gap_ms"`
 
 	// Targets — benchmark exits with code 1 if any are breached.
 	// Zero means "no target" (metric is still collected).
