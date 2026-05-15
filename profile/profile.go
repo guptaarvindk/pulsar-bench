@@ -140,22 +140,28 @@ func LoadFile(path string) (*Profile, error) {
 }
 
 // ParseSize converts human strings like "1GB", "512MB", "256KiB" to bytes.
+// Suffixes are matched longest-first so "MB" is never mistaken for "B".
 func ParseSize(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ToUpper(s))
-	units := map[string]int64{
-		"B": 1, "KB": 1e3, "KIB": 1 << 10,
-		"MB": 1e6, "MIB": 1 << 20,
-		"GB": 1e9, "GIB": 1 << 30,
-		"TB": 1e12, "TIB": 1 << 40,
+	// Ordered longest-suffix-first to avoid "B" matching before "MB", "GIB", etc.
+	ordered := []struct {
+		suffix string
+		mult   int64
+	}{
+		{"TIB", 1 << 40}, {"TB", 1e12},
+		{"GIB", 1 << 30}, {"GB", 1e9},
+		{"MIB", 1 << 20}, {"MB", 1e6},
+		{"KIB", 1 << 10}, {"KB", 1e3},
+		{"B", 1},
 	}
-	for suffix, mult := range units {
-		if strings.HasSuffix(s, suffix) {
-			numStr := strings.TrimSuffix(s, suffix)
-			n, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64)
+	for _, u := range ordered {
+		if strings.HasSuffix(s, u.suffix) {
+			numStr := strings.TrimSpace(strings.TrimSuffix(s, u.suffix))
+			n, err := strconv.ParseFloat(numStr, 64)
 			if err != nil {
 				return 0, fmt.Errorf("invalid size %q", s)
 			}
-			return int64(n * float64(mult)), nil
+			return int64(n * float64(u.mult)), nil
 		}
 	}
 	// Plain integer = bytes
