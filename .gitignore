@@ -1,0 +1,23 @@
+# Build outputs
+pulsar
+dist/
+
+# Test data written to mount during runs
+.pulsar-bench/
+
+# Go
+*.test
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+results/
+*.json
+*.png
+
+# macOS
+.DS_Store
