@@ -188,3 +188,104 @@ func fallbackMemMB() float64 {
 	runtime.ReadMemStats(&ms)
 	return float64(ms.Sys) / (1024 * 1024)
 }
+
+// ------------------------------------------------------------------ #
+// Network interface stats — /proc/net/dev
+// ------------------------------------------------------------------ #
+
+// NetIfaceStats holds per-interface throughput and packet rates.
+type NetIfaceStats struct {
+	RxMBps float64 `json:"rx_mbps"`
+	TxMBps float64 `json:"tx_mbps"`
+	RxPkts float64 `json:"rx_pkts_s"`
+	TxPkts float64 `json:"tx_pkts_s"`
+}
+
+type netEntry struct {
+	rxBytes, txBytes     uint64
+	rxPackets, txPackets uint64
+}
+
+var prevNet struct {
+	mu    sync.Mutex
+	stats map[string]netEntry
+	at    time.Time
+}
+
+// SampleNetStats returns per-interface throughput (MB/s) and packet rates
+// since the last call. Loopback and zero-traffic interfaces are excluded.
+// First call always returns nil (establishes baseline).
+func SampleNetStats() map[string]NetIfaceStats {
+	f, err := os.Open("/proc/net/dev")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	cur := make(map[string]netEntry)
+	sc := bufio.NewScanner(f)
+	// Skip the two header lines.
+	sc.Scan()
+	sc.Scan()
+	for sc.Scan() {
+		line := sc.Text()
+		colonIdx := strings.Index(line, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		iface := strings.TrimSpace(line[:colonIdx])
+		if iface == "lo" {
+			continue // skip loopback
+		}
+		fields := strings.Fields(line[colonIdx+1:])
+		if len(fields) < 16 {
+			continue
+		}
+		rxB, _ := strconv.ParseUint(fields[0], 10, 64)
+		rxP, _ := strconv.ParseUint(fields[1], 10, 64)
+		txB, _ := strconv.ParseUint(fields[8], 10, 64)
+		txP, _ := strconv.ParseUint(fields[9], 10, 64)
+		cur[iface] = netEntry{rxBytes: rxB, txBytes: txB, rxPackets: rxP, txPackets: txP}
+	}
+
+	now := time.Now()
+	prevNet.mu.Lock()
+	prev := prevNet.stats
+	prevAt := prevNet.at
+	prevNet.stats = cur
+	prevNet.at = now
+	prevNet.mu.Unlock()
+
+	if prev == nil || prevAt.IsZero() {
+		return nil
+	}
+	elapsed := now.Sub(prevAt).Seconds()
+	if elapsed <= 0 {
+		return nil
+	}
+
+	result := make(map[string]NetIfaceStats)
+	for iface, c := range cur {
+		p, ok := prev[iface]
+		if !ok {
+			continue
+		}
+		rxMBps := float64(c.rxBytes-p.rxBytes) / (1e6 * elapsed)
+		txMBps := float64(c.txBytes-p.txBytes) / (1e6 * elapsed)
+		rxPkts := float64(c.rxPackets-p.rxPackets) / elapsed
+		txPkts := float64(c.txPackets-p.txPackets) / elapsed
+		// Only include interfaces with actual traffic.
+		if rxMBps > 0 || txMBps > 0 {
+			result[iface] = NetIfaceStats{
+				RxMBps: rxMBps,
+				TxMBps: txMBps,
+				RxPkts: rxPkts,
+				TxPkts: txPkts,
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}

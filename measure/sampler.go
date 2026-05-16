@@ -18,7 +18,8 @@ type MetricSample struct {
 	OpP99Ms   float64            `json:"op_p99_ms"`
 	CPUPct    float64            `json:"cpu_pct"`
 	MemMB     float64            `json:"mem_mb"`
-	DiskIOPS  map[string]float64 `json:"disk_iops,omitempty"`
+	DiskIOPS  map[string]float64   `json:"disk_iops,omitempty"`
+	NetIfaces map[string]NetIfaceStats `json:"net_ifaces,omitempty"`
 }
 
 // Sampler polls metrics at a fixed interval and stores time-series samples.
@@ -60,9 +61,10 @@ func (s *Sampler) Start() {
 	if s.tp != nil {
 		s.prevSnap = s.tp.Snapshot()
 	}
-	// Prime CPU and disk state (first reading is always delta=0)
+	// Prime CPU, disk, and network state (first reading is always delta=0)
 	SampleCPUPct()
 	SampleDiskIOPS()
+	SampleNetStats()
 
 	s.wg.Add(1)
 	go func() {
@@ -133,6 +135,7 @@ func (s *Sampler) collect() {
 	sample.CPUPct = SampleCPUPct()
 	sample.MemMB = SampleMemMB()
 	sample.DiskIOPS = SampleDiskIOPS()
+	sample.NetIfaces = SampleNetStats()
 
 	s.mu.Lock()
 	s.samples = append(s.samples, sample)

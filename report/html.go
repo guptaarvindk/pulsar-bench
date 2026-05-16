@@ -172,6 +172,10 @@ footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 24
     <h3>Disk IOPS per Drive</h3>
     <div class="chart-wrap"><canvas id="chartDisk"></canvas></div>
   </div>
+  <div class="chart-card" id="netCard">
+    <h3>Network Throughput (MB/s) — RX &amp; TX per Interface</h3>
+    <div class="chart-wrap"><canvas id="chartNet"></canvas></div>
+  </div>
 </div>
 {{else}}
 <div class="card"><p class="no-data">No time-series samples in this result. Re-run the benchmark to collect per-second data.</p></div>
@@ -295,6 +299,22 @@ if (!samples || samples.length === 0) {
     new Chart(document.getElementById('chartDisk'), cfg(diskDatasets, 'IOPS'));
   } else {
     document.getElementById('diskCard').innerHTML = '<h3>Disk IOPS per Drive</h3><div class="no-data">Not available (requires Linux /proc/diskstats)</div>';
+  }
+
+  // 8. Network throughput — one RX line + one TX line (dashed) per interface
+  const netIfaces = [...new Set(samples.flatMap(s => s.net_ifaces ? Object.keys(s.net_ifaces) : []))];
+  const netPalette = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899','#84cc16'];
+  if (netIfaces.length > 0) {
+    const netDatasets = netIfaces.flatMap((iface, i) => {
+      const color = netPalette[i % netPalette.length];
+      return [
+        ds(iface + ' RX', samples.map(s => (s.net_ifaces && s.net_ifaces[iface]) ? s.net_ifaces[iface].rx_mbps : 0), color),
+        ds(iface + ' TX', samples.map(s => (s.net_ifaces && s.net_ifaces[iface]) ? s.net_ifaces[iface].tx_mbps : 0), color, true),
+      ];
+    });
+    new Chart(document.getElementById('chartNet'), cfg(netDatasets, 'MB/s'));
+  } else {
+    document.getElementById('netCard').innerHTML = '<h3>Network Throughput</h3><div class="no-data">Not available (requires Linux /proc/net/dev)</div>';
   }
 }
 </script>

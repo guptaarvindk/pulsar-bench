@@ -17,3 +17,15 @@ func SampleMemMB() float64 {
 func SampleDiskIOPS() map[string]float64 {
 	return nil // not available on non-Linux
 }
+
+// NetIfaceStats is defined here for non-Linux builds so the type is always available.
+type NetIfaceStats struct {
+	RxMBps float64 `json:"rx_mbps"`
+	TxMBps float64 `json:"tx_mbps"`
+	RxPkts float64 `json:"rx_pkts_s"`
+	TxPkts float64 `json:"tx_pkts_s"`
+}
+
+func SampleNetStats() map[string]NetIfaceStats {
+	return nil // not available on non-Linux
+}
