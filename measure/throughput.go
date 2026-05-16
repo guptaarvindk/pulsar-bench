@@ -52,6 +52,26 @@ func (t *Throughput) Stats(elapsed time.Duration) ThroughputStats {
 	}
 }
 
+// ThroughputSnapshot is a point-in-time capture of all counters.
+type ThroughputSnapshot struct {
+	BytesRead    int64
+	BytesWritten int64
+	OpsRead      int64
+	OpsWrite     int64
+	At           time.Time
+}
+
+// Snapshot captures current counter values atomically.
+func (t *Throughput) Snapshot() ThroughputSnapshot {
+	return ThroughputSnapshot{
+		BytesRead:    t.bytesRead.Load(),
+		BytesWritten: t.bytesWritten.Load(),
+		OpsRead:      t.opsRead.Load(),
+		OpsWrite:     t.opsWrite.Load(),
+		At:           time.Now(),
+	}
+}
+
 type ThroughputStats struct {
 	ElapsedS     float64
 	BytesRead    int64

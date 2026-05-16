@@ -41,6 +41,8 @@ type Result struct {
 	//   >30%   → storage is a significant training bottleneck
 	GPUStallPct  float64               `json:"gpu_stall_pct"`
 
+	Samples      []measure.MetricSample  `json:"samples,omitempty"`
+
 	Targets      profile.TargetConfig    `json:"targets"`
 	Violations   []string                `json:"violations"`
 	TargetsMissed int                    `json:"targets_missed"`
@@ -144,11 +146,15 @@ func (r *Runner) Run() (*Result, error) {
 		result.Metadata = ms
 		result.Throughput = throughput.Stats(r.p.Duration)
 	default:
+		sampler := measure.NewSampler(time.Second, throughput, ttfb, opLat)
+		sampler.Start()
 		r.runWorkers(measCtx, throughput, ttfb, opLat, stall)
+		sampler.Stop()
 		result.Throughput = throughput.Stats(r.p.Duration)
 		result.TTFB = ttfb.Stats()
 		result.OpLatency = opLat.Stats()
 		result.GPUStallPct = stall.StallPct()
+		result.Samples = sampler.Samples()
 	}
 
 	result.FinishedAt = time.Now()

@@ -53,6 +53,35 @@ func (r *Recorder) Stats() LatencyStats {
 	}
 }
 
+// StatsWindow computes stats only for samples recorded after `offset`.
+// Returns the stats and the new total count (use as next offset).
+// Safe to call concurrently with Record().
+func (r *Recorder) StatsWindow(offset int64) (LatencyStats, int64) {
+	r.mu.Lock()
+	total := int64(len(r.samples))
+	if offset >= total {
+		r.mu.Unlock()
+		return LatencyStats{}, total
+	}
+	window := make([]float64, total-offset)
+	copy(window, r.samples[offset:])
+	r.mu.Unlock()
+
+	if len(window) == 0 {
+		return LatencyStats{}, total
+	}
+	sort.Float64s(window)
+	return LatencyStats{
+		Count:  int64(len(window)),
+		MinMs:  window[0],
+		P50Ms:  pct(window, 50),
+		P95Ms:  pct(window, 95),
+		P99Ms:  pct(window, 99),
+		MaxMs:  window[len(window)-1],
+		MeanMs: mean(window),
+	}, total
+}
+
 // Reset clears all samples (used between epochs).
 func (r *Recorder) Reset() {
 	r.mu.Lock()
