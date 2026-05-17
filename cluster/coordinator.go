@@ -14,6 +14,14 @@ import (
 	"github.com/minio/pulsar/workload"
 )
 
+// httpClient is used for all coordinator→agent calls.
+// The stream timeout is intentionally long (profile duration + 5 min headroom).
+var (
+	httpClient = &http.Client{Timeout: 30 * time.Second}
+	// streamClient has no timeout because the stream stays open for the full run.
+	streamClient = &http.Client{Timeout: 0}
+)
+
 // NodeAddr is host:port for an agent node.
 type NodeAddr string
 
@@ -28,6 +36,13 @@ type Coordinator struct {
 func (c *Coordinator) Run() (*workload.Result, error) {
 	n := len(c.Nodes)
 
+	// resetAll sends /api/reset to every node — best-effort cleanup on error.
+	resetAll := func() {
+		for _, node := range c.Nodes {
+			sendReset(string(node)) //nolint:errcheck
+		}
+	}
+
 	// 1. Clock skew check — all nodes must be within 2s of coordinator
 	for _, node := range c.Nodes {
 		skew, err := checkClockSkew(string(node))
@@ -40,14 +55,13 @@ func (c *Coordinator) Run() (*workload.Result, error) {
 	}
 
 	// 2. Send config to all nodes
-	for i, node := range c.Nodes {
+	for _, node := range c.Nodes {
 		cfg := AgentConfig{
 			Profile: *c.Profile,
 			Paths:   c.Paths,
-			NodeIdx: i,
-			Total:   n,
 		}
 		if err := sendConfig(string(node), cfg); err != nil {
+			resetAll()
 			return nil, fmt.Errorf("node %s config failed: %w", node, err)
 		}
 	}
@@ -66,6 +80,7 @@ func (c *Coordinator) Run() (*workload.Result, error) {
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {
+			resetAll()
 			return nil, fmt.Errorf("node %s start failed: %w", c.Nodes[i], err)
 		}
 	}
@@ -88,7 +103,7 @@ func (c *Coordinator) Run() (*workload.Result, error) {
 
 func checkClockSkew(node string) (time.Duration, error) {
 	t0 := time.Now()
-	resp, err := http.Get("http://" + node + "/api/time")
+	resp, err := httpClient.Get("http://" + node + "/api/time")
 	if err != nil {
 		return 0, err
 	}
@@ -111,7 +126,7 @@ func sendConfig(node string, cfg AgentConfig) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.Post("http://"+node+"/api/config", "application/json", bytes.NewReader(body))
+	resp, err := httpClient.Post("http://"+node+"/api/config", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -127,7 +142,7 @@ func sendStart(node string, at time.Time) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.Post("http://"+node+"/api/start", "application/json", bytes.NewReader(body))
+	resp, err := httpClient.Post("http://"+node+"/api/start", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -138,8 +153,17 @@ func sendStart(node string, at time.Time) error {
 	return nil
 }
 
+func sendReset(node string) error {
+	resp, err := httpClient.Post("http://"+node+"/api/reset", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
 func streamNode(node string) ([]measure.MetricSample, *workload.Result, error) {
-	resp, err := http.Get("http://" + node + "/api/stream")
+	resp, err := streamClient.Get("http://" + node + "/api/stream")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -339,5 +363,13 @@ func checkTargets(res *workload.Result, p *profile.Profile) ([]string, int) {
 		fmt.Sprintf("write throughput %.2f GB/s < target %.2f GB/s", res.Throughput.WriteGBps, t.WriteGBps))
 	check(t.TTFBColdP99Ms > 0 && res.TTFB.P99Ms > t.TTFBColdP99Ms,
 		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBColdP99Ms))
+	if res.Metadata != nil {
+		check(t.StatP99Ms > 0 && res.Metadata.StatP99Ms > t.StatP99Ms,
+			fmt.Sprintf("stat p99 %.1fms > target %.0fms", res.Metadata.StatP99Ms, t.StatP99Ms))
+		check(t.ReaddirP99Ms > 0 && res.Metadata.ReaddirP99Ms > t.ReaddirP99Ms,
+			fmt.Sprintf("readdir p99 %.1fms > target %.0fms", res.Metadata.ReaddirP99Ms, t.ReaddirP99Ms))
+		check(t.MetaHitRatePct > 0 && res.Metadata.HitRatePct < t.MetaHitRatePct,
+			fmt.Sprintf("metadata hit rate %.1f%% < target %.0f%%", res.Metadata.HitRatePct, t.MetaHitRatePct))
+	}
 	return v, len(v)
 }

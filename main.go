@@ -17,6 +17,12 @@ package main
 
 import "github.com/minio/pulsar/cmd"
 
+// version is injected at build time via:
+//
+//	go build -ldflags "-X main.version=$(git describe --tags --always)"
+var version = "dev"
+
 func main() {
+	cmd.SetVersion(version)
 	cmd.Execute()
 }

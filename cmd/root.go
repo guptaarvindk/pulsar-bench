@@ -35,10 +35,17 @@ func init() {
 	rootCmd.AddCommand(agentCmd)
 }
 
+var buildVersion = "dev"
+
+// SetVersion is called from main() with the version injected by ldflags.
+func SetVersion(v string) {
+	buildVersion = v
+}
+
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("pulsar v0.1.0")
+		fmt.Printf("pulsar %s\n", buildVersion)
 	},
 }

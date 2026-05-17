@@ -558,6 +558,8 @@ func (r *Runner) checkTargets(res *Result) ([]string, int) {
 	if res.Metadata != nil {
 		check(t.StatP99Ms > 0 && res.Metadata.StatP99Ms > t.StatP99Ms,
 			fmt.Sprintf("stat p99 %.1fms > target %.0fms", res.Metadata.StatP99Ms, t.StatP99Ms))
+		check(t.ReaddirP99Ms > 0 && res.Metadata.ReaddirP99Ms > t.ReaddirP99Ms,
+			fmt.Sprintf("readdir p99 %.1fms > target %.0fms", res.Metadata.ReaddirP99Ms, t.ReaddirP99Ms))
 		check(t.MetaHitRatePct > 0 && res.Metadata.HitRatePct < t.MetaHitRatePct,
 			fmt.Sprintf("metadata hit rate %.1f%% < target %.0f%%", res.Metadata.HitRatePct, t.MetaHitRatePct))
 	}

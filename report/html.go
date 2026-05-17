@@ -36,22 +36,24 @@ func WriteHTML(path, title string, r *workload.Result) error {
 }
 
 type reportSummary struct {
-	Profile      string                `json:"profile"`
-	WorkloadType string                `json:"workload_type"`
-	Path         string                `json:"path"`
-	Workers      int                   `json:"workers"`
-	DurationS    float64               `json:"duration_s"`
-	DirectIO     bool                  `json:"direct_io"`
-	ReadGBps     float64               `json:"read_gbps"`
-	WriteGBps    float64               `json:"write_gbps"`
-	TTFBP99Ms    float64               `json:"ttfb_p99_ms"`
-	GPUStallPct  float64               `json:"gpu_stall_pct"`
-	Pass         bool                  `json:"pass"`
-	Violations   []string              `json:"violations"`
-	StartedAt    string                `json:"started_at"`
-	PerPath      []workload.PathResult `json:"per_path,omitempty"`
-	PerNode      []workload.NodeResult `json:"per_node,omitempty"`
+	Profile      string                     `json:"profile"`
+	WorkloadType string                     `json:"workload_type"`
+	Path         string                     `json:"path"`
+	Workers      int                        `json:"workers"`
+	DurationS    float64                    `json:"duration_s"`
+	DirectIO     bool                       `json:"direct_io"`
+	ReadGBps     float64                    `json:"read_gbps"`
+	WriteGBps    float64                    `json:"write_gbps"`
+	TTFBP99Ms    float64                    `json:"ttfb_p99_ms"`
+	GPUStallPct  float64                    `json:"gpu_stall_pct"`
+	Pass         bool                       `json:"pass"`
+	Violations   []string                   `json:"violations"`
+	StartedAt    string                     `json:"started_at"`
+	PerPath      []workload.PathResult      `json:"per_path,omitempty"`
+	PerNode      []workload.NodeResult      `json:"per_node,omitempty"`
 	Accelerator  *workload.AcceleratorStats `json:"accelerator,omitempty"`
+	Epochs       []workload.EpochStats      `json:"epochs,omitempty"`
+	Metadata     *workload.MetadataStats    `json:"metadata,omitempty"`
 }
 
 func buildSummary(r *workload.Result) reportSummary {
@@ -72,6 +74,8 @@ func buildSummary(r *workload.Result) reportSummary {
 		PerPath:      r.PerPath,
 		PerNode:      r.PerNode,
 		Accelerator:  r.Accelerator,
+		Epochs:       r.Epochs,
+		Metadata:     r.Metadata,
 	}
 }
 
@@ -152,6 +156,8 @@ footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 24
 
 <div id="perPathTable"></div>
 <div id="perNodeTable"></div>
+<div id="epochTable"></div>
+<div id="metaTable"></div>
 
 <div id="violationsBox" class="violations" style="display:none">
   <h3>Target Violations</h3>
@@ -262,6 +268,36 @@ if (summary.per_node && summary.per_node.length > 1) {
   html += '<tr class="agg"><td>TOTAL</td><td>' + totalReadStr + '</td><td>' + totalWriteStr + '</td><td></td></tr>';
   html += '</tbody></table>';
   document.getElementById('perNodeTable').innerHTML = html;
+}
+
+// Epoch breakdown table (multi-epoch profile)
+if (summary.epochs && summary.epochs.length > 0) {
+  let html = '<div class="section-title">Epoch Breakdown</div><table class="perf-table"><thead><tr><th>Epoch</th><th>Read GB/s</th><th>TTFB p50</th><th>TTFB p99</th><th>Ops</th><th>Note</th></tr></thead><tbody>';
+  summary.epochs.forEach((e, i) => {
+    const tp = e.throughput || {};
+    const ttfb = e.ttfb || {};
+    const readStr  = (tp.ReadGBps  || 0) > 0 ? (tp.ReadGBps).toFixed(2) + ' GB/s' : '—';
+    const p50Str   = (ttfb.P50Ms  || 0) > 0 ? ttfb.P50Ms.toFixed(1) + 'ms' : '—';
+    const p99Str   = (ttfb.P99Ms  || 0) > 0 ? ttfb.P99Ms.toFixed(1) + 'ms' : '—';
+    const opsStr   = (ttfb.Count  || 0) > 0 ? ttfb.Count.toLocaleString() : '—';
+    const note     = i === 0 ? 'cold' : 'warm';
+    html += '<tr><td>Epoch ' + e.epoch + '</td><td>' + readStr + '</td><td>' + p50Str + '</td><td>' + p99Str + '</td><td>' + opsStr + '</td><td>' + note + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('epochTable').innerHTML = html;
+}
+
+// Metadata stats table (metadata profile)
+if (summary.metadata) {
+  const m = summary.metadata;
+  let html = '<div class="section-title">Metadata Stats</div><table class="perf-table"><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';
+  html += '<tr><td>stat() ops</td><td>' + (m.stat_ops || 0).toLocaleString() + '</td></tr>';
+  html += '<tr><td>stat() p99 latency</td><td>' + ((m.stat_p99_ms || 0) > 0 ? m.stat_p99_ms.toFixed(2) + ' ms' : '—') + '</td></tr>';
+  html += '<tr><td>readdir() ops</td><td>' + (m.readdir_ops || 0).toLocaleString() + '</td></tr>';
+  html += '<tr><td>readdir() p99 latency</td><td>' + ((m.readdir_p99_ms || 0) > 0 ? m.readdir_p99_ms.toFixed(2) + ' ms' : '—') + '</td></tr>';
+  html += '<tr><td>Metadata hit rate</td><td>' + ((m.hit_rate_pct || 0) > 0 ? m.hit_rate_pct.toFixed(1) + ' %' : '—') + '</td></tr>';
+  html += '</tbody></table>';
+  document.getElementById('metaTable').innerHTML = html;
 }
 
 const badge = document.getElementById('statusBadge');

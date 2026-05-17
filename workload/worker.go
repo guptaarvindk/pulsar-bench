@@ -173,12 +173,19 @@ func (w *worker) loopWrite(
 	idx := w.id % len(w.files)
 	for ctx.Err() == nil {
 		path := w.files[idx]
+		// Use the actual file size so variable-distribution profiles
+		// (image-training, nlp-training, medical-imaging) write the correct
+		// number of bytes per file rather than the profile's base SizeBytes.
+		fileSize := w.p.Files.SizeBytes
+		if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+			fileSize = st.Size()
+		}
 		t0 := time.Now()
 		f, err := openForWrite(path, w.p.DirectIO)
 		if err != nil {
 			continue
 		}
-		remaining := w.p.Files.SizeBytes
+		remaining := fileSize
 		firstWrite := true
 		for remaining > 0 && ctx.Err() == nil {
 			n := min64(int64(len(w.buf)), remaining)
@@ -209,7 +216,11 @@ func (w *worker) loopWrite(
 		}
 		if w.p.FsyncOnWrite {
 			fsyncStart := time.Now()
-			f.Sync()
+			if syncErr := f.Sync(); syncErr != nil {
+				f.Close()
+				idx = (idx + 1) % len(w.files)
+				continue
+			}
 			if stall != nil {
 				stall.AddIO(time.Since(fsyncStart))
 			}
@@ -339,7 +350,10 @@ func (w *worker) doSingleWrite(tp *measure.Throughput, opLat *measure.Recorder) 
 	opStart := time.Now()
 	n, _ := f.Write(w.buf)
 	if w.p.FsyncOnWrite {
-		f.Sync()
+		if syncErr := f.Sync(); syncErr != nil {
+			f.Close()
+			return 0
+		}
 	}
 	ioElapsed := time.Since(opStart)
 	f.Close()

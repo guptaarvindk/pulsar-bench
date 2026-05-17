@@ -11,8 +11,6 @@ import (
 type AgentConfig struct {
 	Profile profile.Profile `json:"profile"`
 	Paths   []string        `json:"paths"`
-	NodeIdx int             `json:"node_idx"`    // 0-based index of this node
-	Total   int             `json:"total_nodes"` // total node count
 }
 
 // StreamMsg is one line of the NDJSON stream from agent to coordinator.
