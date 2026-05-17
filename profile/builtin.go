@@ -14,9 +14,9 @@ func Builtin() []Profile {
 		metadata(),
 		thrash(),
 		mixed(),
-		mlperfResNet(),
-		mlperfBERT(),
-		mlperfUNet(),
+		imageTraining(),
+		nlpTraining(),
+		medicalImaging(),
 	}
 }
 
@@ -200,14 +200,15 @@ func thrash() Profile {
 	}
 }
 
-// mlperfResNet — matches MLPerf Storage ResNet-50 workload.
-// 1.28M JPEG files, log-normal size distribution (mean ~120KB).
-// Access: random reads across the full dataset, no reuse.
+// imageTraining — image classification training I/O pattern.
+// Many small JPEG-like files with log-normal size distribution (mean ~120KB),
+// random reads across the full dataset with no reuse — models ImageNet-style
+// data loading where every epoch shuffles the sample order.
 // Primary metric: samples/second per simulated accelerator.
-func mlperfResNet() Profile {
+func imageTraining() Profile {
 	return Profile{
-		Name:            "mlperf-resnet",
-		Description:     "MLPerf Storage ResNet-50 — 1.28M image files, random reads",
+		Name:            "image-training",
+		Description:     "Image classification training — many small files, random reads (ImageNet pattern)",
 		Focus:           "Samples/sec",
 		Workload:        "random-read",
 		Workers:         128,
@@ -225,12 +226,14 @@ func mlperfResNet() Profile {
 	}
 }
 
-// mlperfBERT — matches MLPerf Storage BERT workload.
-// Large sequential HDF5-equivalent files, repeated access patterns.
-func mlperfBERT() Profile {
+// nlpTraining — NLP/LLM pretraining I/O pattern.
+// Large HDF5-equivalent files (500 MB each), sequential reads with reuse
+// across passes — models BERT-style training where the tokenized corpus
+// is streamed repeatedly across epochs.
+func nlpTraining() Profile {
 	return Profile{
-		Name:            "mlperf-bert",
-		Description:     "MLPerf Storage BERT — large sequential files, repeated passes",
+		Name:            "nlp-training",
+		Description:     "NLP/LLM pretraining — large sequential files, repeated passes (BERT pattern)",
 		Focus:           "Samples/sec",
 		Workload:        "sequential-read",
 		Workers:         32,
@@ -249,12 +252,14 @@ func mlperfBERT() Profile {
 	}
 }
 
-// mlperfUNet — matches MLPerf Storage 3D-UNet workload.
-// Medium-sized medical imaging files, sequential reads.
-func mlperfUNet() Profile {
+// medicalImaging — volumetric medical imaging training I/O pattern.
+// Medium-sized 3D scan files (150 MB each), sequential reads — models
+// training pipelines for segmentation/detection on CT/MRI volumes where
+// each file is one patient scan yielding multiple training samples.
+func medicalImaging() Profile {
 	return Profile{
-		Name:            "mlperf-unet",
-		Description:     "MLPerf Storage 3D-UNet — medical imaging, medium files",
+		Name:            "medical-imaging",
+		Description:     "Medical imaging training — medium volumetric files, sequential reads (3D-UNet pattern)",
 		Focus:           "Samples/sec",
 		Workload:        "sequential-read",
 		Workers:         16,
