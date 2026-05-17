@@ -36,19 +36,22 @@ func WriteHTML(path, title string, r *workload.Result) error {
 }
 
 type reportSummary struct {
-	Profile      string   `json:"profile"`
-	WorkloadType string   `json:"workload_type"`
-	Path         string   `json:"path"`
-	Workers      int      `json:"workers"`
-	DurationS    float64  `json:"duration_s"`
-	DirectIO     bool     `json:"direct_io"`
-	ReadGBps     float64  `json:"read_gbps"`
-	WriteGBps    float64  `json:"write_gbps"`
-	TTFBP99Ms    float64  `json:"ttfb_p99_ms"`
-	GPUStallPct  float64  `json:"gpu_stall_pct"`
-	Pass         bool     `json:"pass"`
-	Violations   []string `json:"violations"`
-	StartedAt    string   `json:"started_at"`
+	Profile      string                `json:"profile"`
+	WorkloadType string                `json:"workload_type"`
+	Path         string                `json:"path"`
+	Workers      int                   `json:"workers"`
+	DurationS    float64               `json:"duration_s"`
+	DirectIO     bool                  `json:"direct_io"`
+	ReadGBps     float64               `json:"read_gbps"`
+	WriteGBps    float64               `json:"write_gbps"`
+	TTFBP99Ms    float64               `json:"ttfb_p99_ms"`
+	GPUStallPct  float64               `json:"gpu_stall_pct"`
+	Pass         bool                  `json:"pass"`
+	Violations   []string              `json:"violations"`
+	StartedAt    string                `json:"started_at"`
+	PerPath      []workload.PathResult `json:"per_path,omitempty"`
+	PerNode      []workload.NodeResult `json:"per_node,omitempty"`
+	Accelerator  *workload.AcceleratorStats `json:"accelerator,omitempty"`
 }
 
 func buildSummary(r *workload.Result) reportSummary {
@@ -66,6 +69,9 @@ func buildSummary(r *workload.Result) reportSummary {
 		Pass:         r.TargetsMissed == 0,
 		Violations:   r.Violations,
 		StartedAt:    r.StartedAt.Format("2006-01-02 15:04:05"),
+		PerPath:      r.PerPath,
+		PerNode:      r.PerNode,
+		Accelerator:  r.Accelerator,
 	}
 }
 
@@ -103,6 +109,12 @@ header .meta { color: var(--muted); font-size: 0.875rem; margin-top: 4px; }
 .card .label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 6px; }
 .card .value { font-size: 1.75rem; font-weight: 700; color: var(--text); }
 .card .unit { font-size: 0.875rem; color: var(--muted); font-weight: 400; }
+.perf-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 0.875rem; }
+.perf-table th { text-align: left; padding: 8px 12px; border-bottom: 2px solid var(--border); font-size: 0.75rem; text-transform: uppercase; color: var(--muted); }
+.perf-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); font-family: 'SF Mono', 'Consolas', monospace; }
+.perf-table tr.slow td { color: var(--red); }
+.perf-table tr.agg td { font-weight: 700; border-top: 2px solid var(--border); }
+.section-title { font-size: 0.875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; margin-top: 24px; }
 .violations { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px 20px; margin-bottom: 24px; }
 .violations h3 { color: #991b1b; font-size: 0.875rem; font-weight: 600; margin-bottom: 8px; }
 .violations ul { list-style: none; }
@@ -131,11 +143,15 @@ footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 24
   <div class="card"><div class="label">Write Throughput</div><div class="value" id="cardWrite">—</div><div class="unit">GB/s</div></div>
   <div class="card"><div class="label">TTFB p99</div><div class="value" id="cardTTFB">—</div><div class="unit">ms</div></div>
   <div class="card"><div class="label">GPU Stall</div><div class="value" id="cardStall">—</div><div class="unit">%</div></div>
+  <div class="card"><div class="label">Samples/sec</div><div class="value" id="cardSamples">—</div></div>
   <div class="card"><div class="label">Workers</div><div class="value" id="cardWorkers">—</div></div>
   <div class="card"><div class="label">Duration</div><div class="value" id="cardDuration">—</div><div class="unit">s</div></div>
   <div class="card"><div class="label">Direct I/O</div><div class="value" id="cardDIO">—</div></div>
   <div class="card"><div class="label">Profile</div><div class="value" id="cardProfile" style="font-size:1rem;line-height:1.8">—</div></div>
 </div>
+
+<div id="perPathTable"></div>
+<div id="perNodeTable"></div>
 
 <div id="violationsBox" class="violations" style="display:none">
   <h3>Target Violations</h3>
@@ -193,10 +209,60 @@ document.getElementById('cardRead').textContent    = summary.read_gbps > 0 ? sum
 document.getElementById('cardWrite').textContent   = summary.write_gbps > 0 ? summary.write_gbps.toFixed(2) : '—';
 document.getElementById('cardTTFB').textContent    = summary.ttfb_p99_ms > 0 ? summary.ttfb_p99_ms.toFixed(1) : '—';
 document.getElementById('cardStall').textContent   = summary.gpu_stall_pct > 0 ? summary.gpu_stall_pct.toFixed(1) : '—';
+document.getElementById('cardSamples').textContent = (summary.accelerator && summary.accelerator.samples_per_sec > 0) ? summary.accelerator.samples_per_sec.toFixed(0) : '—';
 document.getElementById('cardWorkers').textContent = summary.workers;
 document.getElementById('cardDuration').textContent= summary.duration_s.toFixed(0);
 document.getElementById('cardDIO').textContent     = summary.direct_io ? 'Yes' : 'No';
 document.getElementById('cardProfile').textContent = summary.profile;
+
+// Per-path table
+if (summary.per_path && summary.per_path.length > 1) {
+  const maxRead = Math.max(...summary.per_path.map(p => p.throughput ? p.throughput.ReadGBps || 0 : 0));
+  let html = '<div class="section-title">Per-Path Results</div><table class="perf-table"><thead><tr><th>Path</th><th>Read</th><th>Write</th><th>TTFB p99</th></tr></thead><tbody>';
+  let totalRead = 0, totalWrite = 0;
+  summary.per_path.forEach(p => {
+    const tp = p.throughput || {};
+    const ttfb = p.ttfb || {};
+    const readGBps = tp.ReadGBps || 0;
+    const writeGBps = tp.WriteGBps || 0;
+    const isSlow = maxRead > 0 && readGBps < maxRead * 0.5;
+    const readStr = readGBps > 0 ? readGBps.toFixed(2) + ' GB/s' : '—';
+    const writeStr = writeGBps > 0 ? writeGBps.toFixed(2) + ' GB/s' : '—';
+    const ttfbStr = (ttfb.Count || 0) > 0 ? (ttfb.P99Ms || 0).toFixed(1) + 'ms' : '—';
+    const slowTag = isSlow ? ' ← slow' : '';
+    html += '<tr class="' + (isSlow ? 'slow' : '') + '"><td>' + p.path + '</td><td>' + readStr + '</td><td>' + writeStr + '</td><td>' + ttfbStr + slowTag + '</td></tr>';
+    totalRead += readGBps;
+    totalWrite += writeGBps;
+  });
+  const totalReadStr = totalRead > 0 ? totalRead.toFixed(2) + ' GB/s' : '—';
+  const totalWriteStr = totalWrite > 0 ? totalWrite.toFixed(2) + ' GB/s' : '—';
+  html += '<tr class="agg"><td>TOTAL</td><td>' + totalReadStr + '</td><td>' + totalWriteStr + '</td><td></td></tr>';
+  html += '</tbody></table>';
+  document.getElementById('perPathTable').innerHTML = html;
+}
+
+// Per-node table
+if (summary.per_node && summary.per_node.length > 1) {
+  let html = '<div class="section-title">Per-Node Results</div><table class="perf-table"><thead><tr><th>Node</th><th>Read</th><th>Write</th><th>TTFB p99</th></tr></thead><tbody>';
+  let totalRead = 0, totalWrite = 0;
+  summary.per_node.forEach(n => {
+    const tp = n.throughput || {};
+    const ttfb = n.ttfb || {};
+    const readGBps = tp.ReadGBps || 0;
+    const writeGBps = tp.WriteGBps || 0;
+    const readStr = readGBps > 0 ? readGBps.toFixed(2) + ' GB/s' : '—';
+    const writeStr = writeGBps > 0 ? writeGBps.toFixed(2) + ' GB/s' : '—';
+    const ttfbStr = (ttfb.Count || 0) > 0 ? (ttfb.P99Ms || 0).toFixed(1) + 'ms' : '—';
+    html += '<tr><td>' + n.node + '</td><td>' + readStr + '</td><td>' + writeStr + '</td><td>' + ttfbStr + '</td></tr>';
+    totalRead += readGBps;
+    totalWrite += writeGBps;
+  });
+  const totalReadStr = totalRead > 0 ? totalRead.toFixed(2) + ' GB/s' : '—';
+  const totalWriteStr = totalWrite > 0 ? totalWrite.toFixed(2) + ' GB/s' : '—';
+  html += '<tr class="agg"><td>TOTAL</td><td>' + totalReadStr + '</td><td>' + totalWriteStr + '</td><td></td></tr>';
+  html += '</tbody></table>';
+  document.getElementById('perNodeTable').innerHTML = html;
+}
 
 const badge = document.getElementById('statusBadge');
 badge.textContent = summary.pass ? 'PASS' : 'FAIL';

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/minio/pulsar/cluster"
 	"github.com/minio/pulsar/profile"
 	"github.com/minio/pulsar/report"
 	"github.com/minio/pulsar/workload"
@@ -14,20 +16,21 @@ import (
 )
 
 var (
-	flagPath        string
-	flagProfile     string
-	flagWorkers     int
-	flagDuration    time.Duration
-	flagWarmup      time.Duration
-	flagFileSize    string
-	flagFileCount   int
-	flagOutputJSON  string
-	flagNoCleanup   bool
-	flagSeed        int64
-	flagQuiet       bool
-	flagComputeGap  int
-	flagDirectIO    bool
-	flagNoDirectIO  bool
+	flagPaths      []string
+	flagNodes      []string
+	flagProfile    string
+	flagWorkers    int
+	flagDuration   time.Duration
+	flagWarmup     time.Duration
+	flagFileSize   string
+	flagFileCount  int
+	flagOutputJSON string
+	flagNoCleanup  bool
+	flagSeed       int64
+	flagQuiet      bool
+	flagComputeGap int
+	flagDirectIO   bool
+	flagNoDirectIO bool
 )
 
 var runCmd = &cobra.Command{
@@ -39,6 +42,12 @@ var runCmd = &cobra.Command{
   # Training data loading, 32 workers, 2 minute run
   pulsar run --path /mnt/storage --profile training --workers 32 --duration 2m
 
+  # Multi-path: benchmark multiple drives simultaneously
+  pulsar run --path /mnt/nvme0 --path /mnt/nvme1 --path /mnt/nvme2 --profile training
+
+  # Multi-node: coordinate across multiple agent nodes
+  pulsar run --path /mnt/storage --profile training --nodes host1:7762 --nodes host2:7762
+
   # Use a custom profile YAML
   pulsar run --path /mnt/storage --profile ./my-profile.yaml
 
@@ -46,6 +55,11 @@ var runCmd = &cobra.Command{
   pulsar run --path /mnt/storage --profile checkpoint --json results.json`,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Validate paths
+		if len(flagPaths) == 0 {
+			return fmt.Errorf("--path is required")
+		}
+
 		// Load profile
 		var p *profile.Profile
 		var err error
@@ -95,25 +109,45 @@ var runCmd = &cobra.Command{
 			p.DirectIO = false
 		}
 
-		// Validate target path
-		path, err := filepath.Abs(flagPath)
-		if err != nil {
-			return err
-		}
-		if _, err := os.Stat(path); err != nil {
-			return fmt.Errorf("target path %q: %w", path, err)
+		// Resolve and validate all paths
+		paths := make([]string, 0, len(flagPaths))
+		for _, fp := range flagPaths {
+			absPath, err := filepath.Abs(fp)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(absPath); err != nil {
+				return fmt.Errorf("target path %q: %w", absPath, err)
+			}
+			paths = append(paths, absPath)
 		}
 
 		// Print run header
 		if !flagQuiet {
-			report.PrintHeader(p, path)
+			report.PrintHeader(p, paths)
 		}
 
-		// Execute
-		runner := workload.NewRunner(path, p, flagQuiet)
-		result, err := runner.Run()
-		if err != nil {
-			return fmt.Errorf("benchmark failed: %w", err)
+		var result *workload.Result
+
+		// Multi-node path
+		if len(flagNodes) > 0 {
+			coord := &cluster.Coordinator{
+				Nodes:   toNodeAddrs(flagNodes),
+				Profile: p,
+				Paths:   paths,
+				Quiet:   flagQuiet,
+			}
+			result, err = coord.Run()
+			if err != nil {
+				return fmt.Errorf("multi-node benchmark failed: %w", err)
+			}
+		} else {
+			// Single-node (single or multi-path)
+			runner := workload.NewRunner(paths, p, flagQuiet)
+			result, err = runner.Run()
+			if err != nil {
+				return fmt.Errorf("benchmark failed: %w", err)
+			}
 		}
 
 		// Print results
@@ -138,7 +172,8 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
-	runCmd.Flags().StringVar(&flagPath, "path", "", "Target path to benchmark (required)")
+	runCmd.Flags().StringArrayVar(&flagPaths, "path", nil, "Target path(s) to benchmark; repeat for multiple drives (required)")
+	runCmd.Flags().StringArrayVar(&flagNodes, "nodes", nil, "Agent node addresses for multi-node run, e.g. host1:7762 host2:7762")
 	runCmd.Flags().StringVar(&flagProfile, "profile", "training", "Workload profile name or path to YAML file")
 	runCmd.Flags().IntVar(&flagWorkers, "workers", 0, "Number of concurrent workers (overrides profile)")
 	runCmd.Flags().DurationVar(&flagDuration, "duration", 0, "Benchmark duration (overrides profile, e.g. 60s, 5m)")
@@ -152,5 +187,16 @@ func init() {
 	runCmd.Flags().IntVar(&flagComputeGap, "compute-gap", 0, "Simulated GPU compute time between I/O ops in ms (0=disable, enables GPU stall metric)")
 	runCmd.Flags().BoolVar(&flagDirectIO, "direct-io", false, "Force O_DIRECT to bypass page cache (Linux only)")
 	runCmd.Flags().BoolVar(&flagNoDirectIO, "no-direct-io", false, "Disable O_DIRECT even if the profile enables it")
-	_ = runCmd.MarkFlagRequired("path")
+}
+
+// toNodeAddrs converts string addresses to NodeAddr, appending :7762 if no port.
+func toNodeAddrs(addrs []string) []cluster.NodeAddr {
+	result := make([]cluster.NodeAddr, 0, len(addrs))
+	for _, addr := range addrs {
+		if !strings.Contains(addr, ":") {
+			addr = addr + ":7762"
+		}
+		result = append(result, cluster.NodeAddr(addr))
+	}
+	return result
 }

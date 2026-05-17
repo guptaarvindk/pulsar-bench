@@ -59,6 +59,10 @@ type Profile struct {
 	// Zero means "no target" (metric is still collected).
 	Targets TargetConfig `yaml:"targets"`
 
+	// BatchConfig describes the ML batch structure for computing samples/sec.
+	NumAccelerators int   `yaml:"num_accelerators"` // simulated GPU/TPU count
+	SampleSizeBytes int64 `yaml:"sample_size_bytes"` // bytes per training sample
+
 	// Misc
 	Seed    int64 `yaml:"seed"`
 	Cleanup bool  `yaml:"cleanup"` // delete test files after run
@@ -68,6 +72,13 @@ type FilesConfig struct {
 	Count     int    `yaml:"count"`
 	SizeBytes int64  `yaml:"size_bytes"` // populated by ParseSize in YAML pre-processing
 	SizeHuman string `yaml:"size"`       // human-readable: "1GB", "512MB" — parsed at load time
+
+	// Distribution controls how file sizes are generated.
+	// "uniform" (default): all files are SizeBytes.
+	// "imagenet": log-normal distribution matching ImageNet JPEG sizes (mean ~120KB).
+	// "bert": fixed large files matching BERT HDF5 sizes (~4.3GB each).
+	// "unet": fixed files matching 3D-UNet NPZ sizes (~150MB each).
+	Distribution string `yaml:"distribution"`
 }
 
 type TargetConfig struct {

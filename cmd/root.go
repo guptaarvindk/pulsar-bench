@@ -32,6 +32,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(reportCmd)
+	rootCmd.AddCommand(agentCmd)
 }
 
 var versionCmd = &cobra.Command{

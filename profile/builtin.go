@@ -14,6 +14,9 @@ func Builtin() []Profile {
 		metadata(),
 		thrash(),
 		mixed(),
+		mlperfResNet(),
+		mlperfBERT(),
+		mlperfUNet(),
 	}
 }
 
@@ -193,6 +196,78 @@ func thrash() Profile {
 		Cleanup:     true,
 		Targets: TargetConfig{
 			TTFBColdP99Ms: 2000,
+		},
+	}
+}
+
+// mlperfResNet — matches MLPerf Storage ResNet-50 workload.
+// 1.28M JPEG files, log-normal size distribution (mean ~120KB).
+// Access: random reads across the full dataset, no reuse.
+// Primary metric: samples/second per simulated accelerator.
+func mlperfResNet() Profile {
+	return Profile{
+		Name:            "mlperf-resnet",
+		Description:     "MLPerf Storage ResNet-50 — 1.28M image files, random reads",
+		Focus:           "Samples/sec",
+		Workload:        "random-read",
+		Workers:         128,
+		Duration:        300 * time.Second,
+		Warmup:          30 * time.Second,
+		Files:           FilesConfig{Count: 50000, SizeBytes: 120 * 1024, Distribution: "imagenet"},
+		BlockSize:       256 * 1024,
+		DirectIO:        true,
+		NumAccelerators: 8,
+		SampleSizeBytes: 120 * 1024, // one image = one sample
+		Cleanup:         true,
+		Targets: TargetConfig{
+			ReadGBps: 0.5,
+		},
+	}
+}
+
+// mlperfBERT — matches MLPerf Storage BERT workload.
+// Large sequential HDF5-equivalent files, repeated access patterns.
+func mlperfBERT() Profile {
+	return Profile{
+		Name:            "mlperf-bert",
+		Description:     "MLPerf Storage BERT — large sequential files, repeated passes",
+		Focus:           "Samples/sec",
+		Workload:        "sequential-read",
+		Workers:         32,
+		Duration:        300 * time.Second,
+		Warmup:          10 * time.Second,
+		Files:           FilesConfig{Count: 500, SizeBytes: 500 * 1024 * 1024, Distribution: "bert"},
+		BlockSize:       4 * 1024 * 1024,
+		DirectIO:        true,
+		Reuse:           true,
+		NumAccelerators: 8,
+		SampleSizeBytes: 8192, // ~512 tokens × 16 bytes
+		Cleanup:         true,
+		Targets: TargetConfig{
+			ReadGBps: 1.0,
+		},
+	}
+}
+
+// mlperfUNet — matches MLPerf Storage 3D-UNet workload.
+// Medium-sized medical imaging files, sequential reads.
+func mlperfUNet() Profile {
+	return Profile{
+		Name:            "mlperf-unet",
+		Description:     "MLPerf Storage 3D-UNet — medical imaging, medium files",
+		Focus:           "Samples/sec",
+		Workload:        "sequential-read",
+		Workers:         16,
+		Duration:        300 * time.Second,
+		Warmup:          10 * time.Second,
+		Files:           FilesConfig{Count: 480, SizeBytes: 150 * 1024 * 1024, Distribution: "unet"},
+		BlockSize:       1024 * 1024,
+		DirectIO:        true,
+		NumAccelerators: 8,
+		SampleSizeBytes: 150 * 1024 * 1024 / 4, // 4 samples per volume
+		Cleanup:         true,
+		Targets: TargetConfig{
+			ReadGBps: 0.3,
 		},
 	}
 }

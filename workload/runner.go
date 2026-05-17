@@ -6,6 +6,7 @@ package workload
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -41,11 +42,38 @@ type Result struct {
 	//   >30%   → storage is a significant training bottleneck
 	GPUStallPct  float64               `json:"gpu_stall_pct"`
 
+	PerPath      []PathResult            `json:"per_path,omitempty"`
+	PerNode      []NodeResult            `json:"per_node,omitempty"`
+	Accelerator  *AcceleratorStats       `json:"accelerator,omitempty"`
+
 	Samples      []measure.MetricSample  `json:"samples,omitempty"`
 
 	Targets      profile.TargetConfig    `json:"targets"`
 	Violations   []string                `json:"violations"`
 	TargetsMissed int                    `json:"targets_missed"`
+}
+
+// PathResult holds per-path metrics when multiple paths are benchmarked.
+type PathResult struct {
+	Path       string                  `json:"path"`
+	Throughput measure.ThroughputStats `json:"throughput"`
+	TTFB       measure.LatencyStats    `json:"ttfb"`
+	OpLatency  measure.LatencyStats    `json:"op_latency"`
+	Samples    []measure.MetricSample  `json:"samples,omitempty"`
+}
+
+// NodeResult holds per-node metrics in a multi-node run.
+type NodeResult struct {
+	Node       string                  `json:"node"`
+	Throughput measure.ThroughputStats `json:"throughput"`
+	TTFB       measure.LatencyStats    `json:"ttfb"`
+	OpLatency  measure.LatencyStats    `json:"op_latency"`
+}
+
+// AcceleratorStats reports ML accelerator-level throughput metrics.
+type AcceleratorStats struct {
+	NumAccelerators int     `json:"num_accelerators"`
+	SamplesPerSec   float64 `json:"samples_per_sec"`
 }
 
 type MetadataStats struct {
@@ -64,20 +92,21 @@ type EpochStats struct {
 
 // Runner orchestrates benchmark execution.
 type Runner struct {
-	path    string
-	p       *profile.Profile
-	quiet   bool
-	files   []string // paths of created test files
-	rng     *rand.Rand
+	paths     []string
+	p         *profile.Profile
+	quiet     bool
+	files     []string // paths of created test files (flat, across all paths)
+	fileSizes []int64  // parallel to r.files: per-file size
+	rng       *rand.Rand
 }
 
-func NewRunner(path string, p *profile.Profile, quiet bool) *Runner {
+func NewRunner(paths []string, p *profile.Profile, quiet bool) *Runner {
 	seed := p.Seed
 	if seed == 0 {
 		seed = time.Now().UnixNano()
 	}
 	return &Runner{
-		path:  path,
+		paths: paths,
 		p:     p,
 		quiet: quiet,
 		rng:   rand.New(rand.NewSource(seed)),
@@ -85,10 +114,11 @@ func NewRunner(path string, p *profile.Profile, quiet bool) *Runner {
 }
 
 func (r *Runner) Run() (*Result, error) {
+	// Use first path for backwards-compatible Path field
 	result := &Result{
 		Profile:      r.p.Name,
 		WorkloadType: r.p.Workload,
-		Path:         r.path,
+		Path:         r.paths[0],
 		Workers:      r.p.Workers,
 		DirectIO:     r.p.DirectIO,
 		StartedAt:    time.Now(),
@@ -125,44 +155,233 @@ func (r *Runner) Run() (*Result, error) {
 			r.p.Workers, r.p.Duration.Round(time.Second))
 	}
 
-	throughput := measure.NewThroughput()
-	ttfb := &measure.Recorder{}
-	opLat := &measure.Recorder{}
-	stall := &measure.StallTracker{}
-
 	measCtx, measCancel := context.WithTimeout(context.Background(), r.p.Duration)
 	defer measCancel()
 
-	switch r.p.Workload {
-	case "multi-epoch":
-		result.Epochs = r.runEpochs(measCtx)
-		if len(result.Epochs) > 0 {
-			last := result.Epochs[len(result.Epochs)-1]
-			result.Throughput = last.Throughput
-			result.TTFB = last.TTFB
+	if len(r.paths) > 1 {
+		// Multi-path: one goroutine per path
+		r.runMultiPath(measCtx, result)
+	} else {
+		// Single-path: identical to before
+		switch r.p.Workload {
+		case "multi-epoch":
+			result.Epochs = r.runEpochs(measCtx)
+			if len(result.Epochs) > 0 {
+				last := result.Epochs[len(result.Epochs)-1]
+				result.Throughput = last.Throughput
+				result.TTFB = last.TTFB
+			}
+		case "metadata":
+			throughput := measure.NewThroughput()
+			ttfb := &measure.Recorder{}
+			opLat := &measure.Recorder{}
+			ms := r.runMetadata(measCtx, ttfb, opLat)
+			result.Metadata = ms
+			result.Throughput = throughput.Stats(r.p.Duration)
+		default:
+			throughput := measure.NewThroughput()
+			ttfb := &measure.Recorder{}
+			opLat := &measure.Recorder{}
+			stall := &measure.StallTracker{}
+			sampler := measure.NewSampler(time.Second, throughput, ttfb, opLat)
+			sampler.Start()
+			r.runWorkers(measCtx, throughput, ttfb, opLat, stall)
+			sampler.Stop()
+			result.Throughput = throughput.Stats(r.p.Duration)
+			result.TTFB = ttfb.Stats()
+			result.OpLatency = opLat.Stats()
+			result.GPUStallPct = stall.StallPct()
+			result.Samples = sampler.Samples()
 		}
-	case "metadata":
-		ms := r.runMetadata(measCtx, ttfb, opLat)
-		result.Metadata = ms
-		result.Throughput = throughput.Stats(r.p.Duration)
-	default:
-		sampler := measure.NewSampler(time.Second, throughput, ttfb, opLat)
-		sampler.Start()
-		r.runWorkers(measCtx, throughput, ttfb, opLat, stall)
-		sampler.Stop()
-		result.Throughput = throughput.Stats(r.p.Duration)
-		result.TTFB = ttfb.Stats()
-		result.OpLatency = opLat.Stats()
-		result.GPUStallPct = stall.StallPct()
-		result.Samples = sampler.Samples()
 	}
 
 	result.FinishedAt = time.Now()
 	result.DurationS = result.FinishedAt.Sub(result.StartedAt).Seconds()
 
+	// --- Accelerator stats ---
+	if r.p.NumAccelerators > 0 && r.p.SampleSizeBytes > 0 && result.DurationS > 0 {
+		result.Accelerator = &AcceleratorStats{
+			NumAccelerators: r.p.NumAccelerators,
+			SamplesPerSec:   float64(result.Throughput.BytesRead) / result.DurationS / float64(r.p.SampleSizeBytes),
+		}
+	}
+
 	// --- Phase 4: Target validation ---
 	result.Violations, result.TargetsMissed = r.checkTargets(result)
 	return result, nil
+}
+
+// runMultiPath runs one goroutine per path, collects per-path results, and aggregates.
+func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
+	n := len(r.paths)
+	type pathOutcome struct {
+		pr     PathResult
+		stall  float64
+	}
+	outcomes := make([]pathOutcome, n)
+
+	// Partition files across paths
+	fileGroups := r.partitionFiles()
+
+	workersPerPath := r.p.Workers / n
+	if workersPerPath < 1 {
+		workersPerPath = 1
+	}
+
+	var wg sync.WaitGroup
+	for i, pth := range r.paths {
+		wg.Add(1)
+		i, pth := i, pth
+		go func() {
+			defer wg.Done()
+			tp := measure.NewThroughput()
+			ttfb := &measure.Recorder{}
+			opLat := &measure.Recorder{}
+			stall := &measure.StallTracker{}
+			sampler := measure.NewSampler(time.Second, tp, ttfb, opLat)
+			sampler.Start()
+
+			// Create a sub-runner for this path's files
+			subRunner := &Runner{
+				paths: []string{pth},
+				p:     r.p,
+				quiet: true,
+				files: fileGroups[i],
+				rng:   rand.New(rand.NewSource(r.rng.Int63())),
+			}
+			// Override workers to per-path count
+			subP := *r.p
+			subP.Workers = workersPerPath
+			subRunner.p = &subP
+
+			subRunner.runWorkers(ctx, tp, ttfb, opLat, stall)
+			sampler.Stop()
+
+			pr := PathResult{
+				Path:       pth,
+				Throughput: tp.Stats(r.p.Duration),
+				TTFB:       ttfb.Stats(),
+				OpLatency:  opLat.Stats(),
+				Samples:    sampler.Samples(),
+			}
+			outcomes[i] = pathOutcome{pr: pr, stall: stall.StallPct()}
+		}()
+	}
+	wg.Wait()
+
+	// Collect per-path results
+	perPath := make([]PathResult, n)
+	allLatStats := make([]measure.LatencyStats, 0, n)
+	allOpStats := make([]measure.LatencyStats, 0, n)
+	var totalStall float64
+
+	for i, o := range outcomes {
+		perPath[i] = o.pr
+		allLatStats = append(allLatStats, o.pr.TTFB)
+		allOpStats = append(allOpStats, o.pr.OpLatency)
+		totalStall += o.stall
+	}
+	result.PerPath = perPath
+
+	// Aggregate throughput
+	var totalBytesRead, totalBytesWritten, totalReadOps, totalWriteOps int64
+	for _, o := range outcomes {
+		totalBytesRead += o.pr.Throughput.BytesRead
+		totalBytesWritten += o.pr.Throughput.BytesWritten
+		totalReadOps += o.pr.Throughput.ReadOps
+		totalWriteOps += o.pr.Throughput.WriteOps
+	}
+	secs := r.p.Duration.Seconds()
+	result.Throughput = measure.ThroughputStats{
+		ElapsedS:     secs,
+		BytesRead:    totalBytesRead,
+		BytesWritten: totalBytesWritten,
+		ReadGBps:     float64(totalBytesRead) / (1e9 * secs),
+		WriteGBps:    float64(totalBytesWritten) / (1e9 * secs),
+		ReadMBps:     float64(totalBytesRead) / (1e6 * secs),
+		WriteMBps:    float64(totalBytesWritten) / (1e6 * secs),
+		ReadOps:      totalReadOps,
+		WriteOps:     totalWriteOps,
+		ReadIOPS:     float64(totalReadOps) / secs,
+		WriteIOPS:    float64(totalWriteOps) / secs,
+	}
+
+	// Aggregate latency
+	result.TTFB = mergeLatencyStats(allLatStats)
+	result.OpLatency = mergeLatencyStats(allOpStats)
+	result.GPUStallPct = totalStall / float64(n)
+
+	// Merge samples from all paths
+	var allSamples []measure.MetricSample
+	for _, o := range outcomes {
+		allSamples = append(allSamples, o.pr.Samples...)
+	}
+	result.Samples = allSamples
+}
+
+// partitionFiles divides r.files evenly among paths.
+func (r *Runner) partitionFiles() [][]string {
+	n := len(r.paths)
+	groups := make([][]string, n)
+	for i := range groups {
+		groups[i] = []string{}
+	}
+	for i, f := range r.files {
+		groups[i%n] = append(groups[i%n], f)
+	}
+	return groups
+}
+
+// mergeLatencyStats merges multiple LatencyStats into one aggregate.
+// Sum Count, take min of Min, max of Max, weighted mean for Mean.
+// For P50/P95/P99: use the stat from the recorder with the most samples.
+func mergeLatencyStats(all []measure.LatencyStats) measure.LatencyStats {
+	if len(all) == 0 {
+		return measure.LatencyStats{}
+	}
+	var merged measure.LatencyStats
+	var totalCount int64
+	var weightedMean float64
+	var minMs float64 = math.MaxFloat64
+	var maxMs float64
+
+	// Find the one with most samples for percentiles
+	bestIdx := 0
+	for i, s := range all {
+		if s.Count > all[bestIdx].Count {
+			bestIdx = i
+		}
+		totalCount += s.Count
+		weightedMean += s.MeanMs * float64(s.Count)
+		if s.MinMs < minMs && s.MinMs > 0 {
+			minMs = s.MinMs
+		}
+		if s.MaxMs > maxMs {
+			maxMs = s.MaxMs
+		}
+	}
+
+	if minMs == math.MaxFloat64 {
+		minMs = 0
+	}
+
+	merged.Count = totalCount
+	if totalCount > 0 {
+		merged.MeanMs = weightedMean / float64(totalCount)
+	}
+	merged.MinMs = minMs
+	merged.MaxMs = maxMs
+
+	// Use percentiles from the recorder with most samples (approximation)
+	best := all[bestIdx]
+	merged.P25Ms = best.P25Ms
+	merged.P50Ms = best.P50Ms
+	merged.P75Ms = best.P75Ms
+	merged.P90Ms = best.P90Ms
+	merged.P95Ms = best.P95Ms
+	merged.P99Ms = best.P99Ms
+
+	return merged
 }
 
 // runWorkers launches p.Workers goroutines and blocks until ctx is done.
@@ -252,11 +471,21 @@ func (r *Runner) runMetadata(
 	}
 }
 
-// prepare creates test files on the target path using deterministic content.
+// prepare creates test files on each target path using deterministic content.
+// Files are distributed evenly across paths.
 func (r *Runner) prepare() error {
-	dir := filepath.Join(r.path, ".pulsar-bench")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+	rng := rand.New(rand.NewSource(r.p.Seed))
+	fileSizes := profile.GenerateFileSizes(r.p.Files.Distribution, r.p.Files.Count, r.p.Files.SizeBytes, rng)
+
+	n := len(r.paths)
+	totalFiles := r.p.Files.Count
+
+	// Create .pulsar-bench dirs under each path
+	for _, pth := range r.paths {
+		dir := filepath.Join(pth, ".pulsar-bench")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
 	}
 
 	buf := make([]byte, min64(r.p.BlockSize, 4*1024*1024))
@@ -265,13 +494,21 @@ func (r *Runner) prepare() error {
 		buf[i] = byte(i % 251)
 	}
 
-	r.files = make([]string, 0, r.p.Files.Count)
-	for i := 0; i < r.p.Files.Count; i++ {
+	r.files = make([]string, 0, totalFiles)
+	r.fileSizes = make([]int64, 0, totalFiles)
+
+	for i := 0; i < totalFiles; i++ {
+		pathIdx := i % n
+		pth := r.paths[pathIdx]
+		dir := filepath.Join(pth, ".pulsar-bench")
 		fpath := filepath.Join(dir, fmt.Sprintf("file-%04d.bin", i))
+		fileSize := fileSizes[i]
+
 		r.files = append(r.files, fpath)
+		r.fileSizes = append(r.fileSizes, fileSize)
 
 		// If file already exists with the right size, reuse it (--no-cleanup).
-		if st, err := os.Stat(fpath); err == nil && st.Size() == r.p.Files.SizeBytes {
+		if st, err := os.Stat(fpath); err == nil && st.Size() == fileSize {
 			continue
 		}
 
@@ -279,7 +516,7 @@ func (r *Runner) prepare() error {
 		if err != nil {
 			return err
 		}
-		remaining := r.p.Files.SizeBytes
+		remaining := fileSize
 		for remaining > 0 {
 			n := min64(int64(len(buf)), remaining)
 			if _, err := f.Write(buf[:n]); err != nil {
@@ -294,8 +531,10 @@ func (r *Runner) prepare() error {
 }
 
 func (r *Runner) cleanup() {
-	dir := filepath.Join(r.path, ".pulsar-bench")
-	os.RemoveAll(dir)
+	for _, pth := range r.paths {
+		dir := filepath.Join(pth, ".pulsar-bench")
+		os.RemoveAll(dir)
+	}
 }
 
 func (r *Runner) checkTargets(res *Result) ([]string, int) {

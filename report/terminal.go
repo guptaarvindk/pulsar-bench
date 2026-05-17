@@ -20,12 +20,19 @@ const (
 	colGray   = "\033[90m"
 )
 
-func PrintHeader(p *profile.Profile, path string) {
+func PrintHeader(p *profile.Profile, paths []string) {
 	fmt.Println()
 	fmt.Printf("%s%s  Pulsar AI Storage Benchmark%s\n", colBold, colCyan, colReset)
 	fmt.Printf("%s%s%s\n", colGray, strings.Repeat("─", 60), colReset)
 	fmt.Printf("  Profile   : %s%s%s  —  %s\n", colBold, p.Name, colReset, p.Description)
-	fmt.Printf("  Path      : %s\n", path)
+	if len(paths) == 1 {
+		fmt.Printf("  Path      : %s\n", paths[0])
+	} else {
+		fmt.Printf("  Paths     : %s\n", paths[0])
+		for _, pth := range paths[1:] {
+			fmt.Printf("              %s\n", pth)
+		}
+	}
 	fmt.Printf("  Workers   : %d\n", p.Workers)
 	fmt.Printf("  Duration  : %s\n", p.Duration.Round(time.Second))
 	fmt.Printf("  Files     : %d × %s  (total %s)\n",
@@ -133,6 +140,23 @@ func PrintResult(r *workload.Result) {
 		fmt.Printf("    %s%.1f%%%s  — %s\n", stallColor, r.GPUStallPct, colReset, verdict)
 	}
 
+	// ── Accelerator stats ──────────────────────────────────────────
+	if r.Accelerator != nil {
+		a := r.Accelerator
+		fmt.Printf("\n  %sAccelerator Metrics%s  (%d GPU/TPU)\n", colBold, colReset, a.NumAccelerators)
+		fmt.Printf("    Samples/sec  %.1f\n", a.SamplesPerSec)
+	}
+
+	// ── Per-path breakdown ──────────────────────────────────────────
+	if len(r.PerPath) > 1 {
+		PrintPerPath(r.PerPath)
+	}
+
+	// ── Per-node breakdown ──────────────────────────────────────────
+	if len(r.PerNode) > 1 {
+		printPerNode(r.PerNode)
+	}
+
 	// ── Target violations ───────────────────────────────────────────
 	fmt.Printf("\n  %sTarget Check%s\n", colBold, colReset)
 	if len(r.Violations) == 0 {
@@ -155,6 +179,110 @@ func PrintResult(r *workload.Result) {
 		strings.Repeat("─", 60),
 	)
 	fmt.Println()
+}
+
+// PrintPerPath prints a per-path breakdown table.
+// Only called when len(results) > 1.
+func PrintPerPath(results []workload.PathResult) {
+	fmt.Printf("\n  %sPer-Path Results%s\n", colBold, colReset)
+	fmt.Printf("    %-30s  %-12s  %-12s  %-12s\n", "PATH", "READ", "WRITE", "TTFB p99")
+	fmt.Printf("    %s\n", strings.Repeat("─", 72))
+
+	// Find max read throughput for slow-path detection
+	maxRead := 0.0
+	for _, pr := range results {
+		if pr.Throughput.ReadGBps > maxRead {
+			maxRead = pr.Throughput.ReadGBps
+		}
+	}
+
+	var totalRead, totalWrite float64
+	for _, pr := range results {
+		isSlow := maxRead > 0 && pr.Throughput.ReadGBps < maxRead*0.5
+		readStr := "—"
+		if pr.Throughput.BytesRead > 0 {
+			readStr = fmt.Sprintf("%.2f GB/s", pr.Throughput.ReadGBps)
+		}
+		writeStr := "—"
+		if pr.Throughput.BytesWritten > 0 {
+			writeStr = fmt.Sprintf("%.2f GB/s", pr.Throughput.WriteGBps)
+		}
+		ttfbStr := "—"
+		if pr.TTFB.Count > 0 {
+			ttfbStr = fmtMs(pr.TTFB.P99Ms)
+		}
+
+		slowTag := ""
+		if isSlow {
+			slowTag = colRed + "  ← slow" + colReset
+		}
+
+		// Shorten path if too long
+		displayPath := pr.Path
+		if len(displayPath) > 28 {
+			displayPath = "…" + displayPath[len(displayPath)-27:]
+		}
+
+		if isSlow {
+			fmt.Printf("    %s%-30s%s  %-12s  %-12s  %-12s%s\n",
+				colRed, displayPath, colReset, readStr, writeStr, ttfbStr, slowTag)
+		} else {
+			fmt.Printf("    %-30s  %-12s  %-12s  %-12s\n",
+				displayPath, readStr, writeStr, ttfbStr)
+		}
+
+		totalRead += pr.Throughput.ReadGBps
+		totalWrite += pr.Throughput.WriteGBps
+	}
+
+	fmt.Printf("    %s\n", strings.Repeat("─", 72))
+
+	totalReadStr := "—"
+	if totalRead > 0 {
+		totalReadStr = fmt.Sprintf("%.2f GB/s", totalRead)
+	}
+	totalWriteStr := "—"
+	if totalWrite > 0 {
+		totalWriteStr = fmt.Sprintf("%.2f GB/s", totalWrite)
+	}
+	fmt.Printf("    %-30s  %-12s  %-12s\n", "TOTAL", totalReadStr, totalWriteStr)
+}
+
+func printPerNode(results []workload.NodeResult) {
+	fmt.Printf("\n  %sPer-Node Results%s\n", colBold, colReset)
+	fmt.Printf("    %-30s  %-12s  %-12s  %-12s\n", "NODE", "READ", "WRITE", "TTFB p99")
+	fmt.Printf("    %s\n", strings.Repeat("─", 72))
+
+	var totalRead, totalWrite float64
+	for _, nr := range results {
+		readStr := "—"
+		if nr.Throughput.BytesRead > 0 {
+			readStr = fmt.Sprintf("%.2f GB/s", nr.Throughput.ReadGBps)
+		}
+		writeStr := "—"
+		if nr.Throughput.BytesWritten > 0 {
+			writeStr = fmt.Sprintf("%.2f GB/s", nr.Throughput.WriteGBps)
+		}
+		ttfbStr := "—"
+		if nr.TTFB.Count > 0 {
+			ttfbStr = fmtMs(nr.TTFB.P99Ms)
+		}
+		fmt.Printf("    %-30s  %-12s  %-12s  %-12s\n",
+			nr.Node, readStr, writeStr, ttfbStr)
+		totalRead += nr.Throughput.ReadGBps
+		totalWrite += nr.Throughput.WriteGBps
+	}
+
+	fmt.Printf("    %s\n", strings.Repeat("─", 72))
+	totalReadStr := "—"
+	if totalRead > 0 {
+		totalReadStr = fmt.Sprintf("%.2f GB/s", totalRead)
+	}
+	totalWriteStr := "—"
+	if totalWrite > 0 {
+		totalWriteStr = fmt.Sprintf("%.2f GB/s", totalWrite)
+	}
+	fmt.Printf("    %-30s  %-12s  %-12s\n", "TOTAL", totalReadStr, totalWriteStr)
 }
 
 // ------------------------------------------------------------------ helpers
