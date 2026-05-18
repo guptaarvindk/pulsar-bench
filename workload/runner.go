@@ -158,27 +158,53 @@ func (r *Runner) Run() (*Result, error) {
 	measCtx, measCancel := context.WithTimeout(context.Background(), r.p.Duration)
 	defer measCancel()
 
-	if len(r.paths) > 1 {
-		// Multi-path: one goroutine per path
-		r.runMultiPath(measCtx, result)
-	} else {
-		// Single-path: identical to before
-		switch r.p.Workload {
-		case "multi-epoch":
-			result.Epochs = r.runEpochs(measCtx)
-			if len(result.Epochs) > 0 {
-				last := result.Epochs[len(result.Epochs)-1]
-				result.Throughput = last.Throughput
-				result.TTFB = last.TTFB
+	// metadata and multi-epoch have specialised runners that don't support
+	// multi-path decomposition — always route them through the single-path
+	// code regardless of how many paths were given.
+	switch r.p.Workload {
+	case "multi-epoch":
+		result.Epochs = r.runEpochs(measCtx)
+		if len(result.Epochs) > 0 {
+			// Aggregate throughput = mean across all epochs.
+			// TTFB aggregate = merged across all epochs (preserves cold vs warm signal).
+			var totalRead, totalWritten, totalReadOps, totalWriteOps int64
+			var totalElapsed float64
+			ttfbAll := make([]measure.LatencyStats, 0, len(result.Epochs))
+			for _, e := range result.Epochs {
+				totalRead += e.Throughput.BytesRead
+				totalWritten += e.Throughput.BytesWritten
+				totalReadOps += e.Throughput.ReadOps
+				totalWriteOps += e.Throughput.WriteOps
+				totalElapsed += e.Throughput.ElapsedS
+				ttfbAll = append(ttfbAll, e.TTFB)
 			}
-		case "metadata":
-			throughput := measure.NewThroughput()
-			ttfb := &measure.Recorder{}
-			opLat := &measure.Recorder{}
-			ms := r.runMetadata(measCtx, ttfb, opLat)
-			result.Metadata = ms
-			result.Throughput = throughput.Stats(r.p.Duration)
-		default:
+			if totalElapsed > 0 {
+				result.Throughput = measure.ThroughputStats{
+					ElapsedS:     totalElapsed,
+					BytesRead:    totalRead,
+					BytesWritten: totalWritten,
+					ReadGBps:     float64(totalRead) / (1e9 * totalElapsed),
+					WriteGBps:    float64(totalWritten) / (1e9 * totalElapsed),
+					ReadMBps:     float64(totalRead) / (1e6 * totalElapsed),
+					WriteMBps:    float64(totalWritten) / (1e6 * totalElapsed),
+					ReadOps:      totalReadOps,
+					WriteOps:     totalWriteOps,
+					ReadIOPS:     float64(totalReadOps) / totalElapsed,
+					WriteIOPS:    float64(totalWriteOps) / totalElapsed,
+				}
+			}
+			result.TTFB = mergeLatencyStats(ttfbAll)
+		}
+	case "metadata":
+		ttfb := &measure.Recorder{}
+		opLat := &measure.Recorder{}
+		ms := r.runMetadata(measCtx, ttfb, opLat)
+		result.Metadata = ms
+	default:
+		if len(r.paths) > 1 {
+			// Multi-path: one goroutine per path
+			r.runMultiPath(measCtx, result)
+		} else {
 			throughput := measure.NewThroughput()
 			ttfb := &measure.Recorder{}
 			opLat := &measure.Recorder{}
@@ -228,6 +254,12 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 		workersPerPath = 1
 	}
 
+	// Pre-generate per-path seeds before goroutines start.
+	pathSeeds := make([]int64, n)
+	for i := range pathSeeds {
+		pathSeeds[i] = r.rng.Int63()
+	}
+
 	var wg sync.WaitGroup
 	for i, pth := range r.paths {
 		wg.Add(1)
@@ -247,7 +279,7 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 				p:     r.p,
 				quiet: true,
 				files: fileGroups[i],
-				rng:   rand.New(rand.NewSource(r.rng.Int63())),
+				rng:   rand.New(rand.NewSource(pathSeeds[i])),
 			}
 			// Override workers to per-path count
 			subP := *r.p
@@ -385,6 +417,8 @@ func mergeLatencyStats(all []measure.LatencyStats) measure.LatencyStats {
 }
 
 // runWorkers launches p.Workers goroutines and blocks until ctx is done.
+// Seeds are generated sequentially before goroutines start to avoid
+// concurrent access on the shared r.rng (which is not goroutine-safe).
 func (r *Runner) runWorkers(
 	ctx context.Context,
 	tp *measure.Throughput,
@@ -392,13 +426,19 @@ func (r *Runner) runWorkers(
 	opLat *measure.Recorder,
 	stall *measure.StallTracker,
 ) {
+	// Pre-generate one seed per worker while still single-threaded.
+	seeds := make([]int64, r.p.Workers)
+	for i := range seeds {
+		seeds[i] = r.rng.Int63()
+	}
+
 	var wg sync.WaitGroup
 	for i := 0; i < r.p.Workers; i++ {
 		wg.Add(1)
 		workerID := i
+		workerRng := rand.New(rand.NewSource(seeds[i]))
 		go func() {
 			defer wg.Done()
-			workerRng := rand.New(rand.NewSource(r.rng.Int63()))
 			w := newWorker(r.p.Workload, r.files, r.p, workerID, workerRng)
 			w.Run(ctx, tp, ttfb, opLat, stall)
 		}()
@@ -435,13 +475,19 @@ func (r *Runner) runMetadata(
 	ttfb *measure.Recorder,
 	opLat *measure.Recorder,
 ) *MetadataStats {
+	// Pre-generate seeds before goroutines start.
+	seeds := make([]int64, r.p.Workers)
+	for i := range seeds {
+		seeds[i] = r.rng.Int63()
+	}
+
 	var wg sync.WaitGroup
 	statOps := &measure.Recorder{}
 	rdOps := &measure.Recorder{}
 
 	for i := 0; i < r.p.Workers; i++ {
 		wg.Add(1)
-		workerRng := rand.New(rand.NewSource(r.rng.Int63()))
+		workerRng := rand.New(rand.NewSource(seeds[i]))
 		files := r.files
 		go func() {
 			defer wg.Done()
@@ -474,8 +520,11 @@ func (r *Runner) runMetadata(
 // prepare creates test files on each target path using deterministic content.
 // Files are distributed evenly across paths.
 func (r *Runner) prepare() error {
-	rng := rand.New(rand.NewSource(r.p.Seed))
-	fileSizes := profile.GenerateFileSizes(r.p.Files.Distribution, r.p.Files.Count, r.p.Files.SizeBytes, rng)
+	// Use the runner's own RNG (seeded deterministically in NewRunner) so that
+	// file-size distributions are reproducible with --seed and non-degenerate
+	// without it. The old code created a separate rand.New(rand.NewSource(r.p.Seed))
+	// which produced all-zero imagenet sizes when no seed was given.
+	fileSizes := profile.GenerateFileSizes(r.p.Files.Distribution, r.p.Files.Count, r.p.Files.SizeBytes, r.rng)
 
 	n := len(r.paths)
 	totalFiles := r.p.Files.Count

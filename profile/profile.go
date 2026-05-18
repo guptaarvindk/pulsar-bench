@@ -43,9 +43,12 @@ type Profile struct {
 	Epochs   int  `yaml:"epochs"`    // for multi-epoch: how many full passes
 
 	// I/O knobs
-	BlockSize    int64 `yaml:"block_size"`    // bytes per read/write syscall
-	DirectIO     bool  `yaml:"direct_io"`      // O_DIRECT (Linux only; silently ignored on macOS)
-	FsyncOnWrite bool  `yaml:"fsync_on_write"`  // fsync() after every write
+	// BlockSize is the bytes per read/write syscall (set by built-in profiles as int64).
+	// In YAML files, use the human-readable block_size field instead: e.g. block_size: 1MB.
+	BlockSize      int64  `yaml:"block_size_bytes"` // internal: bytes
+	BlockSizeHuman string `yaml:"block_size"`        // YAML: "256KB", "4MB", etc.
+	DirectIO       bool   `yaml:"direct_io"`         // O_DIRECT (Linux only; silently ignored on macOS)
+	FsyncOnWrite   bool   `yaml:"fsync_on_write"`    // fsync() after every write
 
 	// ComputeGapMs simulates GPU processing time between I/O bursts.
 	// After reading one file (or one pass), each worker sleeps this many
@@ -92,9 +95,27 @@ type TargetConfig struct {
 	MetaHitRatePct  float64 `yaml:"meta_hit_rate_pct"` // 0–100
 }
 
+// knownWorkloads is the set of valid workload type strings.
+var knownWorkloads = map[string]bool{
+	"sequential-read": true,
+	"random-read":     true,
+	"write":           true,
+	"mixed":           true,
+	"metadata":        true,
+	"multi-epoch":     true,
+	"agent-workspace": true,
+}
+
 func (p *Profile) validate() error {
 	if p.Workload == "" {
 		return fmt.Errorf("workload must be set")
+	}
+	if !knownWorkloads[p.Workload] {
+		known := []string{
+			"sequential-read", "random-read", "write", "mixed",
+			"metadata", "multi-epoch", "agent-workspace",
+		}
+		return fmt.Errorf("unknown workload %q — valid values: %s", p.Workload, strings.Join(known, ", "))
 	}
 	if p.Workers <= 0 {
 		p.Workers = 8
@@ -115,8 +136,15 @@ func (p *Profile) validate() error {
 	if p.Files.SizeBytes == 0 {
 		p.Files.SizeBytes = 1 << 30 // 1 GB default
 	}
+	if p.BlockSizeHuman != "" && p.BlockSize == 0 {
+		sz, err := ParseSize(p.BlockSizeHuman)
+		if err != nil {
+			return fmt.Errorf("block_size %q: %w", p.BlockSizeHuman, err)
+		}
+		p.BlockSize = sz
+	}
 	if p.BlockSize == 0 {
-		p.BlockSize = 256 * 1024 // 256 KiB — matches agstor fio default
+		p.BlockSize = 256 * 1024 // 256 KiB default
 	}
 	if p.Epochs == 0 {
 		p.Epochs = 2

@@ -203,7 +203,7 @@ footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 24
 <div class="card"><p class="no-data">No time-series samples in this result. Re-run the benchmark to collect per-second data.</p></div>
 {{end}}
 
-<footer>Pulsar AI Storage Benchmark &mdash; <a href="https://github.com/guptaarvindk/pulsar-bench" style="color:inherit">github.com/guptaarvindk/pulsar-bench</a></footer>
+<footer>Pulsar AI Storage Benchmark &mdash; <a href="https://github.com/minio/pulsar" style="color:inherit">github.com/minio/pulsar</a></footer>
 </div>
 
 <script>

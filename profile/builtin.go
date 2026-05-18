@@ -103,22 +103,24 @@ func multiEpoch() Profile {
 }
 
 // checkpoint — writing large model checkpoints then reading them back.
-// Pattern: large sequential write + fsync + sequential read for restore test.
+// Pattern: 70% large sequential writes with fsync (checkpoint save) +
+// 30% sequential reads (restore verification). Mixed workload so both
+// read-back and write paths are exercised concurrently.
 // Write throughput and fsync latency are the key metrics.
 func checkpoint() Profile {
 	return Profile{
 		Name:        "checkpoint",
 		Description: "Model checkpoint save/restore — large write + fsync + read-back",
 		Focus:       "Write Throughput",
-		Workload:    "write",
+		Workload:    "mixed",
 		Workers:     8,
 		Duration:    60 * time.Second,
 		Warmup:      5 * time.Second,
 		Files:        FilesConfig{Count: 4, SizeBytes: 10 << 30}, // 4 × 10 GB
-		BlockSize:   4 * 1024 * 1024,                             // 4 MiB writes
+		BlockSize:   4 * 1024 * 1024,                             // 4 MiB I/O
 		FsyncOnWrite: true,
-		ReadPct:     30, // read-back after write (simulates restore verification)
 		WritePct:    70,
+		ReadPct:     30,
 		Cleanup:     true,
 		Targets: TargetConfig{
 			WriteGBps: 1.0,

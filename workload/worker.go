@@ -2,6 +2,7 @@ package workload
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
@@ -221,8 +222,14 @@ func (w *worker) loopWrite(
 				idx = (idx + 1) % len(w.files)
 				continue
 			}
+			fsyncElapsed := time.Since(fsyncStart)
+			// Include fsync in both opLat and stall to be consistent
+			// with doSingleWrite, which measures the whole write+sync block.
+			if opLat != nil {
+				opLat.Record(fsyncElapsed)
+			}
 			if stall != nil {
-				stall.AddIO(time.Since(fsyncStart))
+				stall.AddIO(fsyncElapsed)
 			}
 		}
 		f.Close()
@@ -281,7 +288,9 @@ func (w *worker) loopAgentWorkspace(
 			ioElapsed = w.doSingleWrite(tp, opLat)
 		case roll < 90:
 			src := w.files[w.rng.Intn(len(w.files))]
-			dst := filepath.Join(dir, "tmp-rename.bin")
+			// Per-worker temp name avoids racing with other workers on a
+			// shared "tmp-rename.bin" which would corrupt file contents.
+			dst := filepath.Join(dir, fmt.Sprintf("tmp-rename-%d.bin", w.id))
 			t0 := time.Now()
 			os.Rename(src, dst)
 			os.Rename(dst, src)

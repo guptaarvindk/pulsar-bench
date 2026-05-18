@@ -363,6 +363,8 @@ func checkTargets(res *workload.Result, p *profile.Profile) ([]string, int) {
 		fmt.Sprintf("write throughput %.2f GB/s < target %.2f GB/s", res.Throughput.WriteGBps, t.WriteGBps))
 	check(t.TTFBColdP99Ms > 0 && res.TTFB.P99Ms > t.TTFBColdP99Ms,
 		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBColdP99Ms))
+	check(t.TTFBWarmP99Ms > 0 && res.TTFB.P99Ms > t.TTFBWarmP99Ms && res.Epochs != nil,
+		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBWarmP99Ms))
 	if res.Metadata != nil {
 		check(t.StatP99Ms > 0 && res.Metadata.StatP99Ms > t.StatP99Ms,
 			fmt.Sprintf("stat p99 %.1fms > target %.0fms", res.Metadata.StatP99Ms, t.StatP99Ms))

@@ -12,17 +12,29 @@ func GenerateFileSizes(dist string, count int, baseSizeBytes int64, rng *rand.Ra
 	case "imagenet":
 		return logNormalSizes(count, 120*1024, 0.7, rng) // mean=120KB, σ=0.7 in log-space
 	case "bert":
-		// BERT: large HDF5-equivalent files, ~4.3 GB each
+		// BERT-pattern: large HDF5-equivalent sequential files.
+		// Uses baseSizeBytes from the profile when set (non-zero),
+		// otherwise falls back to the canonical 4.3 GB per file.
+		bertSize := int64(4_300_000_000)
+		if baseSizeBytes > 0 {
+			bertSize = baseSizeBytes
+		}
 		sizes := make([]int64, count)
 		for i := range sizes {
-			sizes[i] = align4k(4_300_000_000)
+			sizes[i] = align4k(bertSize)
 		}
 		return sizes
 	case "unet":
-		// 3D-UNet: NPZ medical imaging, ~150 MB each
+		// 3D-UNet pattern: volumetric medical imaging files.
+		// Uses baseSizeBytes from the profile when set (non-zero),
+		// otherwise falls back to the canonical 150 MB per file.
+		unetSize := int64(150_000_000)
+		if baseSizeBytes > 0 {
+			unetSize = baseSizeBytes
+		}
 		sizes := make([]int64, count)
 		for i := range sizes {
-			sizes[i] = align4k(150_000_000)
+			sizes[i] = align4k(unetSize)
 		}
 		return sizes
 	default: // "uniform"

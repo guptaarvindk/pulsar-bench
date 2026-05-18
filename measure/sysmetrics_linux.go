@@ -50,8 +50,9 @@ func readCPULine() (cpuState, error) {
 	return cpuState{}, fmt.Errorf("cpu line not found")
 }
 
-// SampleCPUPct returns the CPU usage percentage since last call (all cores combined, 0–100*ncpu).
-// First call always returns 0.
+// SampleCPUPct returns the CPU usage as a percentage of total capacity (0–100%).
+// This is the system-wide average across all cores, normalised so 100% means
+// all cores fully busy. First call always returns 0 (establishes baseline).
 func SampleCPUPct() float64 {
 	cur, err := readCPULine()
 	if err != nil {
@@ -69,7 +70,9 @@ func SampleCPUPct() float64 {
 		return 0
 	}
 	deltaIdle := float64(cur.idle - prev.idle)
-	return (1 - deltaIdle/deltaTotal) * 100.0 * float64(runtime.NumCPU())
+	// /proc/stat reports aggregate jiffies across all CPUs, so dividing
+	// (active/total) already yields a 0–100% system-wide average.
+	return (1 - deltaIdle/deltaTotal) * 100.0
 }
 
 // SampleMemMB returns resident set size of this process in megabytes.
@@ -163,24 +166,54 @@ func SampleDiskIOPS() map[string]float64 {
 	return result
 }
 
-// isPartition returns true for sda1, nvme0n1p1, etc.
+// isPartition returns true if dev is a partition rather than a whole disk.
+//
+// Whole-disk patterns we want to KEEP:
+//   sda, sdb         — SCSI/SATA whole disks (no trailing digit)
+//   nvme0n1          — NVMe whole disk (ends in nN, not nNpM)
+//   md0, md127       — Linux software RAID
+//   dm-0, dm-1       — Device-mapper (LVM, LUKS, etc.)
+//   vda, xvda        — virtio/Xen virtual disks
+//
+// Partition patterns we want to SKIP:
+//   sda1, sdb2       — SCSI/SATA partitions
+//   nvme0n1p1        — NVMe partitions (ends in pN)
 func isPartition(dev string) bool {
-	for i := len(dev) - 1; i >= 0; i-- {
-		c := dev[i]
-		if c >= '0' && c <= '9' {
-			continue
+	// NVMe whole disks: nvme<ctrl>n<ns>  e.g. nvme0n1, nvme1n2
+	// NVMe partitions:  nvme<ctrl>n<ns>p<part>  e.g. nvme0n1p1
+	if strings.HasPrefix(dev, "nvme") {
+		// A partition has a 'p' followed by digits at the end.
+		// Find the last 'p' and check if everything after it is digits.
+		if idx := strings.LastIndex(dev, "p"); idx > 0 {
+			suffix := dev[idx+1:]
+			if len(suffix) > 0 && isAllDigits(suffix) {
+				return true
+			}
 		}
-		// nvme devices end in pN for partitions (nvme0n1p1)
-		if c == 'p' && i > 0 {
-			return true
-		}
-		// sda1, sdb2 — last char was digit, prev char is letter
-		if i < len(dev)-1 {
-			return true
-		}
+		return false // nvme whole disk
+	}
+
+	// MD RAID and device-mapper are always whole devices.
+	if strings.HasPrefix(dev, "md") || strings.HasPrefix(dev, "dm-") {
 		return false
 	}
-	return false
+
+	// For everything else (sda, vda, xvda, hda, …):
+	// A partition ends in one or more digits. A whole disk does not.
+	// e.g. sda → false, sda1 → true, sdb12 → true
+	if len(dev) == 0 {
+		return false
+	}
+	return dev[len(dev)-1] >= '0' && dev[len(dev)-1] <= '9'
+}
+
+func isAllDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func fallbackMemMB() float64 {

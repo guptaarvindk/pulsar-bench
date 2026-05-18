@@ -319,7 +319,7 @@ pulsar run --path /mnt/storage --profile ./my-profile.yaml
 | `files.count` | int | Number of test files |
 | `files.size` | string | Size per file (e.g. `1GB`, `256MB`) |
 | `files.distribution` | string | File size distribution: `imagenet` (log-normal ~120KB), `bert` (500MB fixed), `unet` (150MB fixed) |
-| `block_size` | string | I/O block size (e.g. `256KB`, `4MB`) |
+| `block_size` | string | I/O block size, human-readable (e.g. `256KB`, `4MB`) |
 | `direct_io` | bool | Use O_DIRECT to bypass page cache (Linux only) |
 | `reuse` | bool | Reuse the same files across workers (true) or assign exclusive files (false) |
 | `read_pct` / `write_pct` | int | Read/write ratio for `mixed` workload |
@@ -414,7 +414,7 @@ A stall fraction near 100% means the GPU is waiting on storage; near 0% means st
 
 1. Coordinator checks NTP skew against all agents via RTT/2-corrected round trips (fails if > 2s)
 2. Coordinator POSTs the full profile JSON to `/api/config` on each agent
-3. Coordinator POSTs `{"at_unix_ns": <T+3s>}` to `/api/start` — all agents sleep until `T`
+3. Coordinator POSTs `{"at_unix_nano": <T+3s>}` to `/api/start` — all agents sleep until `T`
 4. Coordinator GETs `/api/stream` from all agents simultaneously; each streams NDJSON `MetricSample` records, then a final `Result` record
 5. Coordinator merges all `Result` records: sums throughput, combines latency histograms, appends per-node breakdown
 

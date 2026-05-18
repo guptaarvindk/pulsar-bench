@@ -163,8 +163,10 @@ var runCmd = &cobra.Command{
 			}
 		}
 
-		// Exit 1 if any target was missed (so CI can catch regressions)
-		if result.TargetsMissed > 0 && !flagQuiet {
+		// Exit 1 if any target was missed (so CI can catch regressions).
+		// Fires regardless of --quiet so --quiet --json pipelines still
+		// receive a non-zero exit code on violations.
+		if result.TargetsMissed > 0 {
 			os.Exit(1)
 		}
 		return nil

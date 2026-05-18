@@ -46,6 +46,17 @@ func (a *Agent) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	// Reject if a benchmark is currently running (done channel open but not closed).
+	if a.done != nil {
+		select {
+		case <-a.done:
+			// Run finished — allow reconfiguration.
+		default:
+			a.mu.Unlock()
+			http.Error(w, "benchmark in progress — wait for completion or POST /api/reset", http.StatusConflict)
+			return
+		}
+	}
 	a.cfg = &cfg
 	a.result = nil
 	a.err = nil
