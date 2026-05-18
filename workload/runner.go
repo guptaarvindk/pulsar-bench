@@ -6,7 +6,6 @@ package workload
 import (
 	"context"
 	"fmt"
-	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -364,56 +363,9 @@ func (r *Runner) partitionFiles() [][]string {
 	return groups
 }
 
-// mergeLatencyStats merges multiple LatencyStats into one aggregate.
-// Sum Count, take min of Min, max of Max, weighted mean for Mean.
-// For P50/P95/P99: use the stat from the recorder with the most samples.
+// mergeLatencyStats is a package-local alias for measure.MergeLatencyStats.
 func mergeLatencyStats(all []measure.LatencyStats) measure.LatencyStats {
-	if len(all) == 0 {
-		return measure.LatencyStats{}
-	}
-	var merged measure.LatencyStats
-	var totalCount int64
-	var weightedMean float64
-	var minMs float64 = math.MaxFloat64
-	var maxMs float64
-
-	// Find the one with most samples for percentiles
-	bestIdx := 0
-	for i, s := range all {
-		if s.Count > all[bestIdx].Count {
-			bestIdx = i
-		}
-		totalCount += s.Count
-		weightedMean += s.MeanMs * float64(s.Count)
-		if s.MinMs < minMs && s.MinMs > 0 {
-			minMs = s.MinMs
-		}
-		if s.MaxMs > maxMs {
-			maxMs = s.MaxMs
-		}
-	}
-
-	if minMs == math.MaxFloat64 {
-		minMs = 0
-	}
-
-	merged.Count = totalCount
-	if totalCount > 0 {
-		merged.MeanMs = weightedMean / float64(totalCount)
-	}
-	merged.MinMs = minMs
-	merged.MaxMs = maxMs
-
-	// Use percentiles from the recorder with most samples (approximation)
-	best := all[bestIdx]
-	merged.P25Ms = best.P25Ms
-	merged.P50Ms = best.P50Ms
-	merged.P75Ms = best.P75Ms
-	merged.P90Ms = best.P90Ms
-	merged.P95Ms = best.P95Ms
-	merged.P99Ms = best.P99Ms
-
-	return merged
+	return measure.MergeLatencyStats(all)
 }
 
 // runWorkers launches p.Workers goroutines and blocks until ctx is done.

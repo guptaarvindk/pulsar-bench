@@ -132,7 +132,7 @@ Run `pulsar list` to see all profiles. Each profile targets a specific AI I/O pa
 | `llm-inference` | TTFB + Throughput | sequential-read | 8 × 10 GiB | LLM model weight loading — large files, repeated access. 100ms compute gap models GPU token-batch time. |
 | `training` | Throughput | sequential-read | 32 × 1 GiB | Training data shard loading — 32 workers, each reading a different shard. 50ms compute gap. |
 | `multi-epoch` | Cache Warmup | multi-epoch | 16 × 1 GiB | Reads the same dataset 3× — epoch 1 is cold, epoch 2+ warm. Measures cache learning speed. |
-| `checkpoint` | Write Throughput | write+read | 4 × 10 GiB | Large sequential write + fsync + read-back. Models model checkpoint save/restore. |
+| `checkpoint` | Write Throughput | mixed | 4 × 10 GiB | 70% sequential writes with fsync + 30% read-back. Models model checkpoint save/restore. |
 | `agent-workspace` | IOPS + Latency | mixed | 1000 × 256 KiB | Small files, heavy metadata, 70/30 read/write. Models AI coding agent file operations. |
 | `metadata` | Metadata | stat+readdir | 10000 × 1 B | Mass `stat()` and `readdir()` concurrency. Tests metadata cache and cold enumeration cost. |
 | `thrash` | Cold-path | random-read | 128 × 1 GiB | 128 GB working set — intentionally exceeds cache. Measures raw backend cold-path floor. |

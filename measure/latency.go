@@ -82,6 +82,52 @@ func (r *Recorder) StatsWindow(offset int64) (LatencyStats, int64) {
 	}, total
 }
 
+// MergeLatencyStats merges multiple LatencyStats into one aggregate.
+// Counts are summed, min/max are taken, mean is weighted by count.
+// Percentiles come from the recorder with the most samples (approximation).
+func MergeLatencyStats(all []LatencyStats) LatencyStats {
+	if len(all) == 0 {
+		return LatencyStats{}
+	}
+	var merged LatencyStats
+	var totalCount int64
+	var weightedMean float64
+	minMs := math.MaxFloat64
+	var maxMs float64
+
+	bestIdx := 0
+	for i, s := range all {
+		if s.Count > all[bestIdx].Count {
+			bestIdx = i
+		}
+		totalCount += s.Count
+		weightedMean += s.MeanMs * float64(s.Count)
+		if s.MinMs < minMs && s.MinMs > 0 {
+			minMs = s.MinMs
+		}
+		if s.MaxMs > maxMs {
+			maxMs = s.MaxMs
+		}
+	}
+	if minMs == math.MaxFloat64 {
+		minMs = 0
+	}
+	merged.Count = totalCount
+	if totalCount > 0 {
+		merged.MeanMs = weightedMean / float64(totalCount)
+	}
+	merged.MinMs = minMs
+	merged.MaxMs = maxMs
+	best := all[bestIdx]
+	merged.P25Ms = best.P25Ms
+	merged.P50Ms = best.P50Ms
+	merged.P75Ms = best.P75Ms
+	merged.P90Ms = best.P90Ms
+	merged.P95Ms = best.P95Ms
+	merged.P99Ms = best.P99Ms
+	return merged
+}
+
 // Reset clears all samples (used between epochs).
 func (r *Recorder) Reset() {
 	r.mu.Lock()
