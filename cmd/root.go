@@ -33,6 +33,7 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(reportCmd)
 	rootCmd.AddCommand(agentCmd)
+	rootCmd.AddCommand(compareCmd)
 }
 
 var buildVersion = "dev"

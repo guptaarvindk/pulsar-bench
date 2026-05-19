@@ -68,7 +68,14 @@ type Profile struct {
 
 	// Misc
 	Seed    int64 `yaml:"seed"`
-	Cleanup bool  `yaml:"cleanup"` // delete test files after run
+	// Verify: if true, write a deterministic pattern and verify it on each read.
+	// Detects silent data corruption. Adds CPU overhead.
+	Verify  bool `yaml:"verify"`
+	// IODepth is the number of concurrent I/O operations per worker.
+	// Default 0 means 1 (sync, one outstanding I/O at a time).
+	// Higher values increase I/O concurrency without adding more workers.
+	IODepth int  `yaml:"iodepth"`
+	Cleanup bool `yaml:"cleanup"` // delete test files after run
 }
 
 type FilesConfig struct {
@@ -104,6 +111,7 @@ var knownWorkloads = map[string]bool{
 	"metadata":        true,
 	"multi-epoch":     true,
 	"agent-workspace": true,
+	"thrash":          true,
 }
 
 func (p *Profile) validate() error {

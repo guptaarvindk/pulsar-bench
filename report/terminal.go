@@ -3,9 +3,12 @@ package report
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/minio/pulsar/measure"
 	"github.com/minio/pulsar/profile"
 	"github.com/minio/pulsar/workload"
 )
@@ -364,4 +367,96 @@ func humanNum(f float64) string {
 		return fmt.Sprintf("%.1fK", f/1e3)
 	}
 	return fmt.Sprintf("%.0f", f)
+}
+
+// LivePrinter writes a one-line progress update to stderr every second.
+// It uses \r to overwrite the same line, so the terminal shows only the
+// latest snapshot. Call Stop() when the run finishes to print a newline.
+//
+// Usage:
+//
+//	lp := report.NewLivePrinter(p.Duration)
+//	lp.Start()
+//	// ... run benchmark, feed samples via lp.Update(sample) ...
+//	lp.Stop()
+type LivePrinter struct {
+	total   time.Duration // expected total benchmark duration (for progress %)
+	mu      sync.Mutex
+	latest  *measure.MetricSample
+	done    chan struct{}
+	stopped bool
+}
+
+func NewLivePrinter(total time.Duration) *LivePrinter {
+	return &LivePrinter{
+		total: total,
+		done:  make(chan struct{}),
+	}
+}
+
+// Update stores the latest sample. Safe to call from any goroutine.
+func (lp *LivePrinter) Update(s measure.MetricSample) {
+	lp.mu.Lock()
+	cp := s
+	lp.latest = &cp
+	lp.mu.Unlock()
+}
+
+// Start begins the background ticker that prints progress lines.
+func (lp *LivePrinter) Start() {
+	go lp.run()
+}
+
+// Stop halts the ticker and prints a final newline so the next output
+// appears on a fresh line.
+func (lp *LivePrinter) Stop() {
+	lp.mu.Lock()
+	if lp.stopped {
+		lp.mu.Unlock()
+		return
+	}
+	lp.stopped = true
+	lp.mu.Unlock()
+	close(lp.done)
+	fmt.Fprint(os.Stderr, "\n")
+}
+
+func (lp *LivePrinter) run() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	start := time.Now()
+	for {
+		select {
+		case <-lp.done:
+			return
+		case <-ticker.C:
+			elapsed := time.Since(start).Round(time.Second)
+			lp.mu.Lock()
+			s := lp.latest
+			lp.mu.Unlock()
+
+			var readStr, writeStr, ttfbStr, cpuStr string
+			if s != nil {
+				readStr = fmt.Sprintf("read:%-8s", fmt.Sprintf("%.2fGB/s", s.ReadGBps))
+				if s.WriteGBps > 0 {
+					writeStr = fmt.Sprintf("  write:%-8s", fmt.Sprintf("%.2fGB/s", s.WriteGBps))
+				}
+				if s.TTFBP99Ms > 0 {
+					ttfbStr = fmt.Sprintf("  ttfb-p99:%-8s", fmtMs(s.TTFBP99Ms))
+				}
+				if s.CPUPct > 0 {
+					cpuStr = fmt.Sprintf("  cpu:%.0f%%", s.CPUPct)
+				}
+			}
+
+			totalStr := ""
+			if lp.total > 0 {
+				totalStr = fmt.Sprintf("/%s", lp.total.Round(time.Second))
+			}
+
+			line := fmt.Sprintf("\r  [%s%s]  %s%s%s%s   ",
+				elapsed, totalStr, readStr, writeStr, ttfbStr, cpuStr)
+			fmt.Fprint(os.Stderr, line)
+		}
+	}
 }

@@ -31,6 +31,11 @@ var (
 	flagComputeGap int
 	flagDirectIO   bool
 	flagNoDirectIO bool
+
+	flagVerify      bool
+	flagIODepth     int
+	flagOutputCSV   string
+	flagSteadyState bool
 )
 
 var runCmd = &cobra.Command{
@@ -108,6 +113,12 @@ var runCmd = &cobra.Command{
 		if flagNoDirectIO {
 			p.DirectIO = false
 		}
+		if flagVerify {
+			p.Verify = true
+		}
+		if cmd.Flags().Changed("iodepth") {
+			p.IODepth = flagIODepth
+		}
 
 		// Resolve and validate all paths
 		paths := make([]string, 0, len(flagPaths))
@@ -120,6 +131,11 @@ var runCmd = &cobra.Command{
 				return fmt.Errorf("target path %q: %w", absPath, err)
 			}
 			paths = append(paths, absPath)
+		}
+
+		// Preflight checks
+		if err := runPreflight(paths, p); err != nil {
+			return fmt.Errorf("preflight: %w", err)
 		}
 
 		// Print run header
@@ -144,7 +160,18 @@ var runCmd = &cobra.Command{
 		} else {
 			// Single-node (single or multi-path)
 			runner := workload.NewRunner(paths, p, flagQuiet)
+			if flagSteadyState {
+				runner.SetSteadyState(true)
+			}
+			var lp *report.LivePrinter
+			if !flagQuiet {
+				lp = report.NewLivePrinter(p.Duration)
+				lp.Start()
+			}
 			result, err = runner.Run()
+			if lp != nil {
+				lp.Stop()
+			}
 			if err != nil {
 				return fmt.Errorf("benchmark failed: %w", err)
 			}
@@ -153,6 +180,11 @@ var runCmd = &cobra.Command{
 		// Print results
 		if !flagQuiet {
 			report.PrintResult(result)
+		}
+
+		// CSV time-series output
+		if flagOutputCSV != "" {
+			report.WriteCSVResult(flagOutputCSV, result.Samples)
 		}
 
 		// JSON output for test framework consumption
@@ -189,6 +221,34 @@ func init() {
 	runCmd.Flags().IntVar(&flagComputeGap, "compute-gap", 0, "Simulated GPU compute time between I/O ops in ms (0=disable, enables GPU stall metric)")
 	runCmd.Flags().BoolVar(&flagDirectIO, "direct-io", false, "Force O_DIRECT to bypass page cache (Linux only)")
 	runCmd.Flags().BoolVar(&flagNoDirectIO, "no-direct-io", false, "Disable O_DIRECT even if the profile enables it")
+	runCmd.Flags().BoolVar(&flagVerify, "verify", false, "Write a deterministic pattern and verify on read (detects corruption)")
+	runCmd.Flags().IntVar(&flagIODepth, "iodepth", 0, "I/O queue depth per worker (0=1, higher=more concurrent I/Os per worker)")
+	runCmd.Flags().StringVar(&flagOutputCSV, "output-csv", "", "Write per-second time-series to this CSV file")
+	runCmd.Flags().BoolVar(&flagSteadyState, "steady-state", false, "Run until throughput stabilizes (CV<2% for 10s) rather than fixed duration")
+}
+
+// runPreflight checks that the target path is ready before the benchmark starts.
+// It verifies: path is writable and has enough free disk space.
+func runPreflight(paths []string, p *profile.Profile) error {
+	needed := int64(p.Files.Count) * p.Files.SizeBytes
+	for _, path := range paths {
+		// Check writability
+		testFile := filepath.Join(path, ".pulsar-preflight-check")
+		f, err := os.Create(testFile)
+		if err != nil {
+			return fmt.Errorf("path %q is not writable: %w", path, err)
+		}
+		f.Close()
+		os.Remove(testFile)
+
+		// Check free space
+		free, err := freeSpaceBytes(path)
+		if err == nil && free < needed+needed/10 { // +10% headroom
+			return fmt.Errorf("path %q has %d GB free but benchmark needs ~%d GB",
+				path, free>>30, needed>>30)
+		}
+	}
+	return nil
 }
 
 // toNodeAddrs converts string addresses to NodeAddr, appending :7762 if no port.

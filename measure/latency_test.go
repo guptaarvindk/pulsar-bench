@@ -60,24 +60,24 @@ func TestRecorder_StatsWindow(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		r.Record(10 * time.Millisecond)
 	}
-	ws1, off1 := r.StatsWindow(0)
+	ws1, total1 := r.StatsWindow(0)
 	if ws1.Count != 10 {
 		t.Errorf("window 1 Count = %d, want 10", ws1.Count)
 	}
-	if off1 != 10 {
-		t.Errorf("offset after window 1 = %d, want 10", off1)
+	if total1 != 10 {
+		t.Errorf("total after window 1 = %d, want 10", total1)
 	}
 
 	// Second batch: 20ms × 5
 	for i := 0; i < 5; i++ {
 		r.Record(20 * time.Millisecond)
 	}
-	ws2, off2 := r.StatsWindow(off1)
+	ws2, total2 := r.StatsWindow(0)
 	if ws2.Count != 5 {
 		t.Errorf("window 2 Count = %d, want 5", ws2.Count)
 	}
-	if off2 != 15 {
-		t.Errorf("offset after window 2 = %d, want 15", off2)
+	if total2 != 15 {
+		t.Errorf("total after window 2 = %d, want 15", total2)
 	}
 	// Window 2 should only contain the 20ms samples
 	if ws2.P50Ms < 19 || ws2.P50Ms > 21 {
@@ -85,12 +85,12 @@ func TestRecorder_StatsWindow(t *testing.T) {
 	}
 
 	// Empty window (no new samples)
-	ws3, off3 := r.StatsWindow(off2)
+	ws3, total3 := r.StatsWindow(0)
 	if ws3.Count != 0 {
 		t.Errorf("empty window Count = %d, want 0", ws3.Count)
 	}
-	if off3 != 15 {
-		t.Errorf("empty window offset = %d, want 15", off3)
+	if total3 != 15 {
+		t.Errorf("empty window total = %d, want 15", total3)
 	}
 }
 

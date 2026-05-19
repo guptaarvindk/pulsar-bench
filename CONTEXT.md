@@ -40,10 +40,16 @@ pulsar-bench/
 │   ├── list.go                 # `pulsar list` — print all built-in profiles
 │   ├── report.go               # `pulsar report` — render HTML from a JSON result file
 │   ├── agent.go                # `pulsar agent` — start the cluster agent HTTP server
+│   ├── compare.go              # `pulsar compare` — diff two JSON result files
+│   ├── preflight_linux.go      # freeSpaceBytes via syscall.Statfs (Linux)
+│   ├── preflight_darwin.go     # freeSpaceBytes via syscall.Statfs (macOS)
+│   ├── preflight_other.go      # freeSpaceBytes stub for other platforms
 │   └── cmd_test.go             # Tests: SetVersion, LoadBuiltin, LoadFile, listCmd output
 ├── profile/
 │   ├── profile.go              # Profile struct, FilesConfig, TargetConfig, LoadBuiltin, LoadFile, ParseSize
-│   ├── builtin.go              # All 11 built-in profiles as Go functions
+│   ├── builtin.go              # All 16 built-in profiles as Go functions
+│   ├── builtin_linux.go        # availableRAMBytes() via /proc/meminfo
+│   ├── builtin_other.go        # availableRAMBytes() → 32 GB constant (non-Linux)
 │   ├── distribution.go         # GenerateFileSizes: imagenet/bert/unet log-normal distributions
 │   ├── profile_test.go         # ParseSize tests (20 cases)
 │   └── distribution_test.go    # GenerateFileSizes tests
@@ -67,7 +73,8 @@ pulsar-bench/
 │   └── coordinator_test.go     # Tests: mergeLatencyStats, checkTargets, mergeResults
 ├── report/
 │   ├── html.go                 # WriteHTML(), buildSummary(), reportSummary struct, self-contained HTML template
-│   ├── terminal.go             # PrintHeader(), PrintResult(), PrintPerPath(), humanBytes(), humanNum()
+│   ├── terminal.go             # PrintHeader(), PrintResult(), PrintPerPath(), humanBytes(), humanNum(), LivePrinter
+│   ├── csv.go                  # WriteCSV(), WriteCSVResult() — per-second MetricSample as CSV
 │   └── report_test.go          # Tests: buildSummary fields, WriteHTML output, humanBytes/humanNum
 └── README.md
 ```
@@ -76,7 +83,9 @@ pulsar-bench/
 
 ## Profiles (Built-in)
 
-All 11 profiles live in `profile/builtin.go`. **"mlperf" is never used** — profiles use workload-descriptive names only.
+All 16 profiles live in `profile/builtin.go`. **"mlperf" is never used** — profiles use workload-descriptive names only.
+
+### AI Workload Profiles
 
 | Name | Workload | Focus | Workers | Duration | Files | Block |
 |------|----------|-------|---------|----------|-------|-------|
@@ -86,11 +95,23 @@ All 11 profiles live in `profile/builtin.go`. **"mlperf" is never used** — pro
 | `checkpoint` | mixed (70W/30R) | Write Throughput | 8 | 60s | 4 × 10 GB | 4 MiB |
 | `agent-workspace` | agent-workspace | IOPS + Latency | 16 | 60s | 1000 × 256 KB | 4 KiB |
 | `metadata` | metadata | Metadata | 32 | 30s | 10000 × 1B | 4096 |
-| `thrash` | random-read | Cold-path | 32 | 60s | 128 × 1 GB | 256 KiB |
+| `thrash` | random-read | Cold-path | 32 | 60s | 128 × **auto** | 256 KiB |
 | `mixed` | mixed (70R/30W) | Mixed | 32 | 60s | 32 × 512 MB | 256 KiB |
 | `image-training` | random-read | Samples/sec | 128 | 300s | 50000 × 120 KB (imagenet dist) | 256 KiB |
 | `nlp-training` | sequential-read | Samples/sec | 32 | 300s | 500 × 500 MB (bert dist) | 4 MiB |
 | `medical-imaging` | sequential-read | Samples/sec | 16 | 300s | 480 × 150 MB (unet dist) | 1 MiB |
+
+### Drive-Level Profiles (dperf-inspired)
+
+| Name | Workload | Focus | Workers | Duration | Files | Block |
+|------|----------|-------|---------|----------|-------|-------|
+| `drive-seq-read` | sequential-read | Throughput | 4 | 30s | 4 × 8 GB | 1 MiB |
+| `drive-seq-write` | write | Write Throughput | 4 | 30s | 4 × 8 GB | 1 MiB |
+| `drive-rand-4k` | random-read | IOPS | 32 | 30s | 32 × 1 GB | 4 KiB |
+| `drive-rand-128k` | random-read | Throughput | 16 | 30s | 16 × 1 GB | 128 KiB |
+| `drive-mixed` | mixed (70R/30W) | Mixed IOPS | 16 | 60s | 16 × 512 MB | 4 KiB |
+
+**`thrash` auto-sizing:** On Linux reads `MemAvailable` from `/proc/meminfo` and sets working set = `2 × availableRAM`, clamped to [64 GB, 1 TB]. On non-Linux defaults to 64 GB. Ensures every read is a cold cache miss regardless of system RAM.
 
 ### Valid Workload Types
 
@@ -124,6 +145,8 @@ num_accelerators: 8
 sample_size_bytes: 122880
 seed: 0
 cleanup: true
+verify: false                    # write deterministic pattern + verify on read (detects corruption)
+iodepth: 0                       # concurrent I/Os per worker (0=1; higher = goroutine fan-out)
 targets:
   ttfb_cold_p99_ms: 500
   ttfb_warm_p99_ms: 50
@@ -339,27 +362,39 @@ Exit code 1 if `result.TargetsMissed > 0`, regardless of `--quiet`.
 pulsar run --path <PATH> --profile <NAME|FILE.yaml> [flags]
 
 Flags:
-  --path          Target path(s); repeat for multi-path
-  --nodes         Agent addresses for multi-node (host:7762)
-  --profile       Built-in profile name or YAML file path (default: training)
-  --workers N     Override profile workers
-  --duration D    Override profile duration (e.g. 60s, 5m)
-  --warmup D      Override warmup window
-  --file-size S   Override file size (e.g. 1GB, 512MB)
-  --file-count N  Override file count
-  --json FILE     Write result JSON to file
-  --no-cleanup    Keep test files after run
-  --seed N        Random seed for reproducibility
-  --quiet         Suppress terminal output (exit code still set)
-  --compute-gap N GPU compute gap in ms (enables stall metric)
-  --direct-io     Force O_DIRECT (Linux only)
-  --no-direct-io  Disable O_DIRECT even if profile enables it
+  --path            Target path(s); repeat for multi-path
+  --nodes           Agent addresses for multi-node (host:7762)
+  --profile         Built-in profile name or YAML file path (default: training)
+  --workers N       Override profile workers
+  --duration D      Override profile duration (e.g. 60s, 5m)
+  --warmup D        Override warmup window
+  --file-size S     Override file size (e.g. 1GB, 512MB)
+  --file-count N    Override file count
+  --json FILE       Write result JSON to file
+  --output-csv FILE Write per-second time-series to CSV file
+  --no-cleanup      Keep test files after run
+  --seed N          Random seed for reproducibility
+  --quiet           Suppress terminal output (exit code still set)
+  --compute-gap N   GPU compute gap in ms (enables stall metric)
+  --direct-io       Force O_DIRECT (Linux only)
+  --no-direct-io    Disable O_DIRECT even if profile enables it
+  --verify          Write deterministic pattern and verify on read (detects corruption)
+  --iodepth N       Concurrent I/Os per worker via goroutine fan-out (default 1)
+  --steady-state    Run until throughput stabilizes (CV<2% for 10s) rather than fixed duration
 
-pulsar list                       # show all built-in profiles
-pulsar version                    # print version
-pulsar report --input res.json    # render HTML from JSON result file
-pulsar agent --port 7762          # start agent for multi-node runs
+pulsar list                           # show all built-in profiles
+pulsar version                        # print version
+pulsar report --input res.json        # render HTML from JSON result file
+pulsar agent --port 7762              # start agent for multi-node runs
+pulsar compare before.json after.json # diff two result JSON files
 ```
+
+### Pre-flight Checks
+
+Before starting a benchmark, `pulsar run` automatically:
+1. **Checks writability** — creates and removes a small probe file at each path
+2. **Checks free disk space** — verifies at least `files.count × files.size + 10%` headroom is available; errors out if insufficient
+3. Implemented via `runPreflight()` in `cmd/run.go`; disk space via OS-specific `freeSpaceBytes()` (Linux/macOS use `syscall.Statfs`)
 
 ### Version Injection
 
@@ -368,6 +403,34 @@ go build -ldflags "-X main.version=$(git describe --tags --always)" -o pulsar .
 ```
 
 `main.version` → `cmd.SetVersion(version)` → stored in `cmd.buildVersion` → used by `version` subcommand.
+
+---
+
+## New Features (v2)
+
+### `--verify` — Data Integrity Checking
+`verifyFill(buf, fileIndex, blockOffset)` fills each block with a deterministic XorShift64 pattern keyed on file index + block offset. `verifyCheck` re-derives the pattern and compares byte-by-byte. Errors are logged to stderr but do not abort the run. Adds CPU overhead proportional to I/O size.
+
+### `--iodepth N` — Goroutine-based I/O Fan-out
+Each worker launches N sub-goroutines (sharing the same metrics recorders) for concurrent I/O. File assignment: `fileIdx = (workerID × iodepth + subID) % len(files)`. For NFS/FUSE paths this effectively increases parallelism. Not true kernel-level async I/O (no io_uring).
+
+### `--steady-state` — Run Until Stable
+`watchSteadyState()` runs alongside the measurement goroutines. Every second it checks the last 10 samples of throughput. If `stddev/mean < 2%` for 10 consecutive seconds, it cancels the measurement context early. Max runtime is 10 minutes regardless.
+
+### `--output-csv FILE` — Time-Series Export
+Writes the per-second `MetricSample` slice as CSV after the run. Columns: `t_s, read_gbps, write_gbps, read_iops, write_iops, ttfb_p50_ms, ttfb_p99_ms, op_p50_ms, op_p99_ms, cpu_pct, mem_mb`. Implemented in `report/csv.go`.
+
+### `pulsar compare before.json after.json` — Result Diff
+Loads two JSON result files and prints a side-by-side table showing before/after values and % delta for all key metrics. Green = improvement (≥5%), red = regression (≥5%), gray = within noise. Implemented in `cmd/compare.go`.
+
+### `report.LivePrinter` — Live Progress Output
+`NewLivePrinter(total time.Duration)` returns a printer that writes a `\r`-overwriting progress line to stderr every second showing elapsed/total time and the latest throughput/TTFB/CPU snapshot. Call `lp.Start()` before the run, `lp.Update(sample)` for each sample, `lp.Stop()` when done. Implemented in `report/terminal.go`.
+
+### Recorder OOM Prevention
+`measure.Recorder` now caps the main sample buffer at 1,000,000 entries (8 MB) using circular overwrite. A separate `winSamples` slice collects samples since the last `StatsWindow()` call for accurate per-second stats; it is reset on each call. Total sample count is tracked in `total int64` and returned by `Count()`.
+
+### Thrash Auto-sizing
+`thrash()` profile calls `availableRAMBytes()` (Linux: `/proc/meminfo MemAvailable`; other: 32 GB default) and sets working set = `2 × availableRAM`, clamped to [64 GB, 1 TB].
 
 ---
 
@@ -383,10 +446,10 @@ go test -race ./...
 |---------|-----------|----------------|
 | `profile` | `profile_test.go` | `ParseSize` (20 cases: SI/IEC/plain int/edge cases) |
 | `profile` | `distribution_test.go` | `GenerateFileSizes` for all distributions; bert/unet respect `baseSizeBytes` |
-| `measure` | `latency_test.go` | `Recorder` (empty/single/percentiles/concurrent/StatsWindow), `StallTracker`, `MergeLatencyStats` |
+| `measure` | `latency_test.go` | `Recorder` (empty/single/percentiles/concurrent/StatsWindow/circular cap), `StallTracker`, `MergeLatencyStats` |
 | `workload` | `targets_test.go` | `checkTargets` (9 cases: all-pass, each target type miss, zero targets) |
 | `cluster` | `coordinator_test.go` | `mergeLatencyStats` (empty/single/two), coordinator `checkTargets` (6 cases), `mergeResults` (2-node/error/nil) |
-| `cmd` | `cmd_test.go` | `SetVersion`, `LoadBuiltin` all 11 profiles + unknown, `LoadFile` (valid/bad workload/block_size formats/missing workload), `listCmd` output |
+| `cmd` | `cmd_test.go` | `SetVersion`, `LoadBuiltin` all 16 profiles + unknown, `LoadFile` (valid/bad workload/block_size formats/missing workload), `listCmd` output |
 | `report` | `report_test.go` | `buildSummary` fields + pass/fail + epoch/metadata/accelerator/per-node passthrough, `WriteHTML` (create/title/profile/epochs/metadata/samples/invalid path), `humanBytes`, `humanNum` |
 
 ---
@@ -417,11 +480,12 @@ go test -race ./...
 
 ## What Does NOT Exist (Intentional)
 
-- No Prometheus/metrics exporter — results are terminal + JSON + HTML only
+- No Prometheus/metrics exporter — results are terminal + JSON + HTML + CSV only
 - No persistent database — each run is self-contained
 - No authentication on the agent HTTP API — intended for trusted cluster networks only
 - No CGo — pure Go, single static binary
 - No Docker image — ship the binary
+- No kernel-level async I/O (io_uring / libaio) — `--iodepth` uses goroutine fan-out, which is appropriate for NFS/FUSE/object-store paths; for raw NVMe benchmarking use fio
 
 ---
 

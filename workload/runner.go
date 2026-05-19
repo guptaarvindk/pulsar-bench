@@ -6,6 +6,7 @@ package workload
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -91,13 +92,18 @@ type EpochStats struct {
 
 // Runner orchestrates benchmark execution.
 type Runner struct {
-	paths     []string
-	p         *profile.Profile
-	quiet     bool
-	files     []string // paths of created test files (flat, across all paths)
-	fileSizes []int64  // parallel to r.files: per-file size
-	rng       *rand.Rand
+	paths       []string
+	p           *profile.Profile
+	quiet       bool
+	steadyState bool
+	files       []string // paths of created test files (flat, across all paths)
+	fileSizes   []int64  // parallel to r.files: per-file size
+	rng         *rand.Rand
 }
+
+// SetSteadyState enables steady-state detection: instead of a fixed duration,
+// the measurement window extends until throughput stabilises (CV < 2% for 10s).
+func (r *Runner) SetSteadyState(v bool) { r.steadyState = v }
 
 func NewRunner(paths []string, p *profile.Profile, quiet bool) *Runner {
 	seed := p.Seed
@@ -210,6 +216,9 @@ func (r *Runner) Run() (*Result, error) {
 			stall := &measure.StallTracker{}
 			sampler := measure.NewSampler(time.Second, throughput, ttfb, opLat)
 			sampler.Start()
+			if r.steadyState {
+				go watchSteadyState(measCtx, measCancel, sampler)
+			}
 			r.runWorkers(measCtx, throughput, ttfb, opLat, stall)
 			sampler.Stop()
 			result.Throughput = throughput.Stats(r.p.Duration)
@@ -566,6 +575,64 @@ func (r *Runner) checkTargets(res *Result) ([]string, int) {
 	}
 
 	return v, len(v)
+}
+
+// watchSteadyState cancels ctx when throughput has been stable for 10 consecutive
+// seconds (coefficient of variation < 2%), or when the parent context is done.
+// It polls the sampler every second. Maximum wait is 10 minutes.
+func watchSteadyState(ctx context.Context, cancel context.CancelFunc, sampler *measure.Sampler) {
+	deadline := time.Now().Add(10 * time.Minute)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var window []float64
+	const windowSize = 10
+	const cvThreshold = 0.02
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				cancel()
+				return
+			}
+			samples := sampler.Samples()
+			if len(samples) == 0 {
+				continue
+			}
+			last := samples[len(samples)-1]
+			v := last.ReadGBps
+			if v == 0 {
+				v = last.WriteGBps
+			}
+			window = append(window, v)
+			if len(window) > windowSize {
+				window = window[len(window)-windowSize:]
+			}
+			if len(window) < windowSize {
+				continue
+			}
+			// compute mean and stddev
+			sum := 0.0
+			for _, x := range window {
+				sum += x
+			}
+			mean := sum / float64(len(window))
+			if mean == 0 {
+				continue
+			}
+			variance := 0.0
+			for _, x := range window {
+				d := x - mean
+				variance += d * d
+			}
+			stddev := math.Sqrt(variance / float64(len(window)))
+			if stddev/mean < cvThreshold {
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 func humanBytes(b int64) string {

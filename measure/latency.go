@@ -9,18 +9,31 @@ import (
 	"time"
 )
 
+const maxSamples = 1_000_000
+
 // Recorder collects raw latency samples from concurrent workers in a
 // lock-free manner and computes percentile distributions on demand.
+// samples is a circular buffer capped at maxSamples to prevent OOM on
+// long runs. winSamples accumulates samples since the last StatsWindow
+// call and is reset on each call.
 type Recorder struct {
-	mu      sync.Mutex
-	samples []float64 // milliseconds
+	mu         sync.Mutex
+	samples    []float64 // circular buffer, capped at maxSamples
+	total      int64     // total ever recorded (may exceed len(samples))
+	winSamples []float64 // samples since last StatsWindow call; reset each call
 }
 
 // Record adds one sample. Safe to call from multiple goroutines.
 func (r *Recorder) Record(d time.Duration) {
 	ms := float64(d.Nanoseconds()) / 1e6
 	r.mu.Lock()
-	r.samples = append(r.samples, ms)
+	r.total++
+	if int64(len(r.samples)) < maxSamples {
+		r.samples = append(r.samples, ms)
+	} else {
+		r.samples[r.total%maxSamples] = ms // circular overwrite
+	}
+	r.winSamples = append(r.winSamples, ms)
 	r.mu.Unlock()
 }
 
@@ -28,10 +41,13 @@ func (r *Recorder) Record(d time.Duration) {
 func (r *Recorder) RecordTTFB(d time.Duration) { r.Record(d) }
 
 // Stats computes the full latency distribution. Call after all workers finish.
+// Uses the circular sample buffer (up to maxSamples); Count reflects total
+// samples ever recorded.
 func (r *Recorder) Stats() LatencyStats {
 	r.mu.Lock()
 	s := make([]float64, len(r.samples))
 	copy(s, r.samples)
+	total := r.total
 	r.mu.Unlock()
 
 	if len(s) == 0 {
@@ -39,7 +55,7 @@ func (r *Recorder) Stats() LatencyStats {
 	}
 	sort.Float64s(s)
 	return LatencyStats{
-		Count:  int64(len(s)),
+		Count:  total,
 		MinMs:  s[0],
 		P25Ms:  pct(s, 25),
 		P50Ms:  pct(s, 50),
@@ -53,32 +69,31 @@ func (r *Recorder) Stats() LatencyStats {
 	}
 }
 
-// StatsWindow computes stats only for samples recorded after `offset`.
-// Returns the stats and the new total count (use as next offset).
+// StatsWindow computes stats for samples recorded since the last call.
+// winSamples is reset on each call so this always returns stats for just
+// the last window. The offset param is ignored (kept for API compatibility).
+// Returns the stats and the current total count.
 // Safe to call concurrently with Record().
 func (r *Recorder) StatsWindow(offset int64) (LatencyStats, int64) {
 	r.mu.Lock()
-	total := int64(len(r.samples))
-	if offset >= total {
-		r.mu.Unlock()
-		return LatencyStats{}, total
-	}
-	window := make([]float64, total-offset)
-	copy(window, r.samples[offset:])
+	win := make([]float64, len(r.winSamples))
+	copy(win, r.winSamples)
+	r.winSamples = r.winSamples[:0]
+	total := r.total
 	r.mu.Unlock()
 
-	if len(window) == 0 {
+	if len(win) == 0 {
 		return LatencyStats{}, total
 	}
-	sort.Float64s(window)
+	sort.Float64s(win)
 	return LatencyStats{
-		Count:  int64(len(window)),
-		MinMs:  window[0],
-		P50Ms:  pct(window, 50),
-		P95Ms:  pct(window, 95),
-		P99Ms:  pct(window, 99),
-		MaxMs:  window[len(window)-1],
-		MeanMs: mean(window),
+		Count:  int64(len(win)),
+		MinMs:  win[0],
+		P50Ms:  pct(win, 50),
+		P95Ms:  pct(win, 95),
+		P99Ms:  pct(win, 99),
+		MaxMs:  win[len(win)-1],
+		MeanMs: mean(win),
 	}, total
 }
 
@@ -132,6 +147,8 @@ func MergeLatencyStats(all []LatencyStats) LatencyStats {
 func (r *Recorder) Reset() {
 	r.mu.Lock()
 	r.samples = r.samples[:0]
+	r.total = 0
+	r.winSamples = r.winSamples[:0]
 	r.mu.Unlock()
 }
 
@@ -139,7 +156,7 @@ func (r *Recorder) Reset() {
 func (r *Recorder) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.samples)
+	return int(r.total)
 }
 
 // LatencyStats is the computed distribution for one recorder.

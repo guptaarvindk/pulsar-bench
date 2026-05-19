@@ -17,6 +17,11 @@ func Builtin() []Profile {
 		imageTraining(),
 		nlpTraining(),
 		medicalImaging(),
+		driveSeqRead(),
+		driveSeqWrite(),
+		driveRand4k(),
+		driveRand128k(),
+		driveMixed(),
 	}
 }
 
@@ -182,7 +187,21 @@ func metadata() Profile {
 // Every read is a cold miss. Shows raw backend throughput and cold-path latency.
 // This is the "worst case" that reveals the floor performance.
 // Direct I/O ensures OS page cache cannot mask backend latency.
+// Working set is auto-sized to 2× available RAM (clamped to [64 GB, 1 TB]).
 func thrash() Profile {
+	// Size working set to 2× available RAM so every read is a cold cache miss.
+	// Clamped to [64 GB, 1 TB] to stay practical.
+	ramBytes := availableRAMBytes()
+	workingSet := ramBytes * 2
+	if workingSet < 64<<30 {
+		workingSet = 64 << 30
+	}
+	if workingSet > 1<<40 {
+		workingSet = 1 << 40
+	}
+	const fileCount = 128
+	fileSize := workingSet / fileCount
+
 	return Profile{
 		Name:        "thrash",
 		Description: "Cache thrash — working set larger than cache, measures cold-path floor",
@@ -191,7 +210,7 @@ func thrash() Profile {
 		Workers:     32,
 		Duration:    60 * time.Second,
 		Warmup:      0,
-		Files:       FilesConfig{Count: 128, SizeBytes: 1 << 30}, // 128 GB — designed to exceed cache
+		Files:       FilesConfig{Count: fileCount, SizeBytes: fileSize},
 		BlockSize:   256 * 1024,
 		DirectIO:    true,  // essential: without O_DIRECT OS page cache hides cold misses
 		Reuse:       false, // random file, random offset every read → maximum eviction pressure
@@ -283,18 +302,103 @@ func medicalImaging() Profile {
 // Default 70/30 read/write. General-purpose stress test.
 func mixed() Profile {
 	return Profile{
-		Name:        "mixed",
-		Description: "Mixed read/write — 70% read, 30% write, all workers concurrent",
-		Focus:       "Mixed",
-		Workload:    "mixed",
+		Name:         "mixed",
+		Description:  "Mixed read/write — 70% read, 30% write, all workers concurrent",
+		Focus:        "Mixed",
+		Workload:     "mixed",
+		Workers:      32,
+		Duration:     60 * time.Second,
+		Warmup:       10 * time.Second,
+		Files:        FilesConfig{Count: 32, SizeBytes: 512 * 1024 * 1024}, // 32 × 512 MB
+		BlockSize:    256 * 1024,
+		ReadPct:      70,
+		WritePct:     30,
+		FsyncOnWrite: false,
+		Cleanup:      true,
+	}
+}
+
+func driveSeqRead() Profile {
+	return Profile{
+		Name:        "drive-seq-read",
+		Description: "Raw sequential read throughput — large blocks, Direct I/O",
+		Focus:       "Throughput",
+		Workload:    "sequential-read",
+		Workers:     4,
+		Duration:    30 * time.Second,
+		Warmup:      5 * time.Second,
+		Files:       FilesConfig{Count: 4, SizeBytes: 8 << 30},
+		BlockSize:   1024 * 1024,
+		DirectIO:    true,
+		Reuse:       true,
+		Cleanup:     true,
+	}
+}
+
+func driveSeqWrite() Profile {
+	return Profile{
+		Name:         "drive-seq-write",
+		Description:  "Raw sequential write throughput — large blocks, Direct I/O, fsync",
+		Focus:        "Write Throughput",
+		Workload:     "write",
+		Workers:      4,
+		Duration:     30 * time.Second,
+		Files:        FilesConfig{Count: 4, SizeBytes: 8 << 30},
+		BlockSize:    1024 * 1024,
+		DirectIO:     true,
+		FsyncOnWrite: true,
+		Cleanup:      true,
+	}
+}
+
+func driveRand4k() Profile {
+	return Profile{
+		Name:        "drive-rand-4k",
+		Description: "Random 4 KiB read IOPS — SSD/NVMe random access characterization",
+		Focus:       "IOPS",
+		Workload:    "random-read",
 		Workers:     32,
+		Duration:    30 * time.Second,
+		Warmup:      5 * time.Second,
+		Files:       FilesConfig{Count: 32, SizeBytes: 1 << 30},
+		BlockSize:   4096,
+		DirectIO:    true,
+		Reuse:       true,
+		Cleanup:     true,
+	}
+}
+
+func driveRand128k() Profile {
+	return Profile{
+		Name:        "drive-rand-128k",
+		Description: "Random 128 KiB read throughput — database I/O characterization",
+		Focus:       "Throughput",
+		Workload:    "random-read",
+		Workers:     16,
+		Duration:    30 * time.Second,
+		Warmup:      5 * time.Second,
+		Files:       FilesConfig{Count: 16, SizeBytes: 1 << 30},
+		BlockSize:   128 * 1024,
+		DirectIO:    true,
+		Reuse:       true,
+		Cleanup:     true,
+	}
+}
+
+func driveMixed() Profile {
+	return Profile{
+		Name:        "drive-mixed",
+		Description: "Mixed 70% read / 30% write IOPS — database/object-store access pattern",
+		Focus:       "Mixed IOPS",
+		Workload:    "mixed",
+		Workers:     16,
 		Duration:    60 * time.Second,
 		Warmup:      10 * time.Second,
-		Files:        FilesConfig{Count: 32, SizeBytes: 512 * 1024 * 1024}, // 32 × 512 MB
-		BlockSize:   256 * 1024,
+		Files:       FilesConfig{Count: 16, SizeBytes: 512 * 1024 * 1024},
+		BlockSize:   4096,
+		DirectIO:    true,
 		ReadPct:     70,
 		WritePct:    30,
-		FsyncOnWrite: false,
 		Cleanup:     true,
 	}
 }
