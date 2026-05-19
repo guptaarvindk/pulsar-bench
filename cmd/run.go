@@ -166,6 +166,7 @@ var runCmd = &cobra.Command{
 			var lp *report.LivePrinter
 			if !flagQuiet {
 				lp = report.NewLivePrinter(p.Duration)
+				runner.SetOnSample(lp.Update)
 				lp.Start()
 			}
 			result, err = runner.Run()

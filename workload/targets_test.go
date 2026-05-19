@@ -149,3 +149,70 @@ func TestCheckTargets_MultipleViolations(t *testing.T) {
 		t.Errorf("expected 4 violations, got %d", missed)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// verifyFill / verifyCheck
+// ---------------------------------------------------------------------------
+
+func TestVerifyFill_Deterministic(t *testing.T) {
+	buf1 := make([]byte, 4096)
+	buf2 := make([]byte, 4096)
+	verifyFill(buf1, 3, 8192)
+	verifyFill(buf2, 3, 8192)
+	for i := range buf1 {
+		if buf1[i] != buf2[i] {
+			t.Fatalf("verifyFill not deterministic at byte %d", i)
+		}
+	}
+}
+
+func TestVerifyFill_DifferentInputsDifferentOutput(t *testing.T) {
+	buf1 := make([]byte, 4096)
+	buf2 := make([]byte, 4096)
+	verifyFill(buf1, 0, 0)
+	verifyFill(buf2, 1, 0) // different fileIndex
+	same := true
+	for i := range buf1 {
+		if buf1[i] != buf2[i] {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Error("different fileIndex should produce different fill pattern")
+	}
+}
+
+func TestVerifyFill_DifferentOffset(t *testing.T) {
+	buf1 := make([]byte, 4096)
+	buf2 := make([]byte, 4096)
+	verifyFill(buf1, 0, 0)
+	verifyFill(buf2, 0, 4096) // different blockOffset
+	same := true
+	for i := range buf1 {
+		if buf1[i] != buf2[i] {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Error("different blockOffset should produce different fill pattern")
+	}
+}
+
+func TestVerifyCheck_PassesOnCorrectData(t *testing.T) {
+	buf := make([]byte, 4096)
+	verifyFill(buf, 5, 16384)
+	if err := verifyCheck(buf, 5, 16384); err != nil {
+		t.Errorf("verifyCheck on correct data: %v", err)
+	}
+}
+
+func TestVerifyCheck_DetectsCorruption(t *testing.T) {
+	buf := make([]byte, 4096)
+	verifyFill(buf, 2, 0)
+	buf[100] ^= 0xFF // flip bits
+	if err := verifyCheck(buf, 2, 0); err == nil {
+		t.Error("verifyCheck should detect corruption, got nil")
+	}
+}

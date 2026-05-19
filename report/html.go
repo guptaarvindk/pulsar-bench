@@ -42,6 +42,7 @@ type reportSummary struct {
 	Workers      int                        `json:"workers"`
 	DurationS    float64                    `json:"duration_s"`
 	DirectIO     bool                       `json:"direct_io"`
+	Verify       bool                       `json:"verify"`
 	ReadGBps     float64                    `json:"read_gbps"`
 	WriteGBps    float64                    `json:"write_gbps"`
 	TTFBP99Ms    float64                    `json:"ttfb_p99_ms"`
@@ -64,6 +65,7 @@ func buildSummary(r *workload.Result) reportSummary {
 		Workers:      r.Workers,
 		DurationS:    r.DurationS,
 		DirectIO:     r.DirectIO,
+		Verify:       r.Verify,
 		ReadGBps:     r.Throughput.ReadGBps,
 		WriteGBps:    r.Throughput.WriteGBps,
 		TTFBP99Ms:    r.TTFB.P99Ms,
@@ -219,6 +221,7 @@ document.getElementById('cardSamples').textContent = (summary.accelerator && sum
 document.getElementById('cardWorkers').textContent = summary.workers;
 document.getElementById('cardDuration').textContent= summary.duration_s.toFixed(0);
 document.getElementById('cardDIO').textContent     = summary.direct_io ? 'Yes' : 'No';
+if (summary.verify) { document.getElementById('cardDIO').textContent += ' + Verify'; }
 document.getElementById('cardProfile').textContent = summary.profile;
 
 // Per-path table

@@ -38,6 +38,14 @@ type Sampler struct {
 	opLatOffset int64
 	done        chan struct{}
 	wg          sync.WaitGroup
+
+	onSample func(MetricSample) // optional callback fired after each sample is stored
+}
+
+// SetOnSample registers a callback that is called (from the sampler goroutine)
+// after each sample is collected. Safe to call before Start().
+func (s *Sampler) SetOnSample(fn func(MetricSample)) {
+	s.onSample = fn
 }
 
 // NewSampler creates a sampler. Call Start() to begin collection.
@@ -140,4 +148,8 @@ func (s *Sampler) collect() {
 	s.mu.Lock()
 	s.samples = append(s.samples, sample)
 	s.mu.Unlock()
+
+	if s.onSample != nil {
+		s.onSample(sample)
+	}
 }

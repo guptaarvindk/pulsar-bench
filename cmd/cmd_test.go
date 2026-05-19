@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/minio/pulsar/measure"
 	"github.com/minio/pulsar/profile"
+	"github.com/minio/pulsar/workload"
 )
 
 // ---------------------------------------------------------------------------
@@ -187,5 +190,98 @@ func TestListCmd_NoMlperfNames(t *testing.T) {
 
 	if strings.Contains(strings.ToLower(buf.String()), "mlperf") {
 		t.Error("list output must not contain 'mlperf'")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// compare command
+// ---------------------------------------------------------------------------
+
+func makeTestResult(prof string, readGBps, ttfbP99 float64) *workload.Result {
+	return &workload.Result{
+		Profile:      prof,
+		WorkloadType: "sequential-read",
+		Workers:      32,
+		DurationS:    60,
+		Throughput:   measure.ThroughputStats{ReadGBps: readGBps, ReadIOPS: readGBps * 4000},
+		TTFB:         measure.LatencyStats{P50Ms: ttfbP99 / 2, P99Ms: ttfbP99, Count: 100},
+	}
+}
+
+func writeResultJSON(t *testing.T, r *workload.Result) string {
+	t.Helper()
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	path := t.TempDir() + "/result.json"
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write result: %v", err)
+	}
+	return path
+}
+
+func TestLoadResult_ValidJSON(t *testing.T) {
+	r := makeTestResult("training", 3.5, 25.0)
+	path := writeResultJSON(t, r)
+	loaded, err := loadResult(path)
+	if err != nil {
+		t.Fatalf("loadResult error: %v", err)
+	}
+	if loaded.Profile != "training" {
+		t.Errorf("Profile = %q, want training", loaded.Profile)
+	}
+	if loaded.Throughput.ReadGBps != 3.5 {
+		t.Errorf("ReadGBps = %f, want 3.5", loaded.Throughput.ReadGBps)
+	}
+}
+
+func TestLoadResult_InvalidJSON(t *testing.T) {
+	path := t.TempDir() + "/bad.json"
+	os.WriteFile(path, []byte("not json"), 0644) //nolint:errcheck
+	_, err := loadResult(path)
+	if err == nil {
+		t.Error("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestLoadResult_MissingFile(t *testing.T) {
+	_, err := loadResult("/nonexistent-pulsar-result.json")
+	if err == nil {
+		t.Error("expected error for missing file, got nil")
+	}
+}
+
+func TestCompareCmd_MissingFiles(t *testing.T) {
+	// compareCmd prints to os.Stdout directly; we only verify it returns an error
+	// when input files don't exist.
+	err := compareCmd.RunE(compareCmd, []string{"/nonexistent.json", "/also-nonexistent.json"})
+	if err == nil {
+		t.Error("expected error for missing files, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// preflight
+// ---------------------------------------------------------------------------
+
+func TestRunPreflight_ValidPath(t *testing.T) {
+	dir := t.TempDir()
+	p := &profile.Profile{
+		Files: profile.FilesConfig{Count: 1, SizeBytes: 1024},
+	}
+	err := runPreflight([]string{dir}, p)
+	if err != nil {
+		t.Errorf("runPreflight on valid writable path: %v", err)
+	}
+}
+
+func TestRunPreflight_UnwritablePath(t *testing.T) {
+	// Use a path that doesn't exist.
+	err := runPreflight([]string{"/nonexistent-pulsar-test-path-xyz"}, &profile.Profile{
+		Files: profile.FilesConfig{Count: 1, SizeBytes: 1024},
+	})
+	if err == nil {
+		t.Error("expected error for unwritable/nonexistent path, got nil")
 	}
 }

@@ -24,6 +24,7 @@ type Result struct {
 	Path         string                `json:"path"`
 	Workers      int                   `json:"workers"`
 	DirectIO     bool                  `json:"direct_io"`
+	Verify       bool                  `json:"verify"`
 	DurationS    float64               `json:"duration_s"`
 	StartedAt    time.Time             `json:"started_at"`
 	FinishedAt   time.Time             `json:"finished_at"`
@@ -99,11 +100,19 @@ type Runner struct {
 	files       []string // paths of created test files (flat, across all paths)
 	fileSizes   []int64  // parallel to r.files: per-file size
 	rng         *rand.Rand
+	onSample    func(measure.MetricSample)
 }
 
 // SetSteadyState enables steady-state detection: instead of a fixed duration,
 // the measurement window extends until throughput stabilises (CV < 2% for 10s).
 func (r *Runner) SetSteadyState(v bool) { r.steadyState = v }
+
+// SetOnSample registers a callback invoked after each per-second sample is
+// collected during the measurement phase. Use this to feed live progress
+// displays. Safe to call before Run().
+func (r *Runner) SetOnSample(fn func(measure.MetricSample)) {
+	r.onSample = fn
+}
 
 func NewRunner(paths []string, p *profile.Profile, quiet bool) *Runner {
 	seed := p.Seed
@@ -126,6 +135,7 @@ func (r *Runner) Run() (*Result, error) {
 		Path:         r.paths[0],
 		Workers:      r.p.Workers,
 		DirectIO:     r.p.DirectIO,
+		Verify:       r.p.Verify,
 		StartedAt:    time.Now(),
 		Targets:      r.p.Targets,
 	}
@@ -215,6 +225,9 @@ func (r *Runner) Run() (*Result, error) {
 			opLat := &measure.Recorder{}
 			stall := &measure.StallTracker{}
 			sampler := measure.NewSampler(time.Second, throughput, ttfb, opLat)
+			if r.onSample != nil {
+				sampler.SetOnSample(r.onSample)
+			}
 			sampler.Start()
 			if r.steadyState {
 				go watchSteadyState(measCtx, measCancel, sampler)

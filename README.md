@@ -39,6 +39,8 @@ Pulsar is a single-binary, zero-dependency storage benchmark that generates real
 - [Multi-Path (Multiple Drives)](#multi-path-multiple-drives)
 - [Multi-Node](#multi-node)
 - [HTML Reports](#html-reports)
+- [Comparing Results](#comparing-results)
+- [CSV Export](#csv-export)
 - [Custom Profiles](#custom-profiles)
 - [CI Integration](#ci-integration)
 - [How it Works](#how-it-works)
@@ -62,11 +64,12 @@ Most storage benchmarks (fio, iozone, bonnie++) measure raw I/O primitives. Puls
 **Key properties:**
 - Single static binary — no Python, no pip, no Java runtime
 - Runs on Linux and macOS (O_DIRECT on Linux, graceful fallback on macOS)
-- Profiles cover the full AI data pipeline: inference, training, checkpointing, agent workspace
+- Profiles cover the full AI data pipeline: inference, training, checkpointing, agent workspace, raw drive characterization
 - Per-second time-series: throughput, TTFB, IOPS, CPU, memory, disk IOPS, network — exportable to HTML with Chart.js graphs
 - Multi-path: benchmark multiple drives simultaneously, spot slow drives automatically
 - Multi-node: coordinate a run across a storage cluster with a single command
 - CI-friendly: `--json` output + exit code 1 when targets are missed
+- Optional data verification (`--verify`) to detect silent data corruption
 
 ---
 
@@ -117,6 +120,9 @@ pulsar run --path /mnt/storage --profile training --workers 64 --duration 2m
 pulsar run --path /mnt/storage --profile training --json results.json
 pulsar report results.json --output report.html
 
+# Run with data verification (detects silent corruption)
+pulsar run --path /mnt/storage --profile training --verify
+
 # List all available profiles
 pulsar list
 ```
@@ -127,6 +133,8 @@ pulsar list
 
 Run `pulsar list` to see all profiles. Each profile targets a specific AI I/O pattern:
 
+### AI Workload Profiles
+
 | Profile | Focus | Workload | Files | Description |
 |---|---|---|---|---|
 | `llm-inference` | TTFB + Throughput | sequential-read | 8 × 10 GiB | LLM model weight loading — large files, repeated access. 100ms compute gap models GPU token-batch time. |
@@ -135,11 +143,21 @@ Run `pulsar list` to see all profiles. Each profile targets a specific AI I/O pa
 | `checkpoint` | Write Throughput | mixed | 4 × 10 GiB | 70% sequential writes with fsync + 30% read-back. Models model checkpoint save/restore. |
 | `agent-workspace` | IOPS + Latency | mixed | 1000 × 256 KiB | Small files, heavy metadata, 70/30 read/write. Models AI coding agent file operations. |
 | `metadata` | Metadata | stat+readdir | 10000 × 1 B | Mass `stat()` and `readdir()` concurrency. Tests metadata cache and cold enumeration cost. |
-| `thrash` | Cold-path | random-read | 128 × 1 GiB | 128 GB working set — intentionally exceeds cache. Measures raw backend cold-path floor. |
+| `thrash` | Cold-path | random-read | 128 × (auto) | Working set auto-sized to 2× available RAM. Measures raw backend cold-path floor. |
 | `mixed` | Mixed | mixed | 32 × 512 MiB | 70% read / 30% write, all workers concurrent. General-purpose stress test. |
 | `image-training` | Samples/sec | random-read | 50000 × ~120 KiB | Image classification training — log-normal file sizes (ImageNet pattern), random access, 8 accelerators. |
 | `nlp-training` | Samples/sec | sequential-read | 500 × 500 MiB | NLP/LLM pretraining — large files, repeated sequential passes (BERT pattern), 8 accelerators. |
 | `medical-imaging` | Samples/sec | sequential-read | 480 × 150 MiB | Medical imaging training — volumetric files (3D-UNet pattern), 4 samples per volume, 8 accelerators. |
+
+### Drive Characterization Profiles
+
+| Profile | Focus | Workload | Files | Description |
+|---|---|---|---|---|
+| `drive-seq-read` | Throughput | sequential-read | 4 × 8 GiB | Raw sequential read — large blocks, Direct I/O. dperf-style drive characterization. |
+| `drive-seq-write` | Write Throughput | write | 4 × 8 GiB | Raw sequential write with fsync — measures sustained write bandwidth. |
+| `drive-rand-4k` | IOPS | random-read | 32 × 1 GiB | Random 4 KiB reads — SSD/NVMe IOPS characterization. |
+| `drive-rand-128k` | Throughput | random-read | 16 × 1 GiB | Random 128 KiB reads — database I/O characterization. |
+| `drive-mixed` | Mixed IOPS | mixed | 16 × 512 MiB | Mixed 70/30 read/write — database/object-store access pattern. |
 
 All profiles with `DirectIO: true` open files with `O_DIRECT` on Linux to bypass the page cache. On macOS, O_DIRECT is silently skipped.
 
@@ -175,6 +193,10 @@ Each profile defines pass/fail targets. If any target is missed, Pulsar prints `
 | `--compute-gap` | 0 | Simulated GPU compute time (ms) between I/O ops. Enables GPU stall fraction metric. |
 | `--direct-io` | false | Force O_DIRECT even if the profile doesn't set it (Linux only) |
 | `--no-direct-io` | false | Disable O_DIRECT even if the profile sets it |
+| `--verify` | false | Write a deterministic pattern and verify on read. Detects silent data corruption. |
+| `--iodepth` | 1 | Concurrent I/O operations per worker via goroutine fan-out. Increases parallelism without adding workers. |
+| `--output-csv` | *(off)* | Write per-second time-series (throughput, TTFB, CPU, memory) to a CSV file. |
+| `--steady-state` | false | Run until throughput stabilizes (coefficient of variation < 2% for 10 consecutive seconds) rather than a fixed duration. Max 10 minutes. |
 | `--nodes` | *(off)* | Agent addresses for multi-node mode, e.g. `--nodes host1:7762 --nodes host2:7762` |
 
 ### `pulsar agent`
@@ -189,6 +211,12 @@ Each profile defines pass/fail targets. If any target is missed, Pulsar prints `
 |---|---|---|
 | `--output` | `report.html` | Output HTML file path |
 | `--title` | *(from JSON)* | Custom title for the report |
+
+### `pulsar compare`
+
+| Flag | Default | Description |
+|---|---|---|
+| *(positional)* | *(required)* | Two JSON result files: `pulsar compare baseline.json candidate.json` |
 
 ---
 
@@ -266,7 +294,7 @@ pulsar report results.json --output report.html --title "NVMe Training Benchmark
 ```
 
 The report includes:
-- Summary cards: throughput, TTFB p99, IOPS, GPU stall %, samples/sec
+- Summary cards: throughput, TTFB p99, IOPS, GPU stall %, samples/sec, Direct I/O mode, verify status
 - 8 time-series charts: read/write throughput, TTFB, IOPS, op latency, CPU%, memory, disk IOPS per drive, network RX/TX per interface
 - Per-drive breakdown table (multi-path runs)
 - Per-node breakdown table (multi-node runs)
@@ -275,6 +303,55 @@ The report includes:
 - Target pass/fail summary
 
 Charts use [Chart.js](https://www.chartjs.org/) embedded inline — no internet connection required to view the report.
+
+---
+
+## Comparing Results
+
+Compare two benchmark runs side-by-side to spot regressions or improvements:
+
+```bash
+# Baseline run
+pulsar run --path /mnt/storage --profile training --json baseline.json
+
+# Candidate run (after a config change)
+pulsar run --path /mnt/storage --profile training --json candidate.json
+
+# Diff the two
+pulsar compare baseline.json candidate.json
+```
+
+Output:
+
+```
+  Pulsar Benchmark Comparison
+  METRIC                      BEFORE          AFTER           DELTA
+  ──────────────────────────────────────────────────────────────────────
+
+  Throughput
+    Read GB/s                 2.810 GB/s      3.410 GB/s      +21.4%
+    Read IOPS                 11.0K iops      13.3K iops      +20.9%
+
+  TTFB
+    TTFB p50                  1.30 ms         1.20 ms         -7.7%
+    TTFB p99                  28.40 ms        22.70 ms        -20.1%
+```
+
+Green = improvement >= 5%. Red = regression >= 5%. Gray = within noise.
+
+---
+
+## CSV Export
+
+Export the per-second time-series as CSV for analysis in Excel, Python, or Grafana:
+
+```bash
+pulsar run --path /mnt/storage --profile training \
+  --json results.json \
+  --output-csv metrics.csv
+```
+
+CSV columns: `t_s, read_gbps, write_gbps, read_iops, write_iops, ttfb_p50_ms, ttfb_p99_ms, op_p50_ms, op_p99_ms, cpu_pct, mem_mb`
 
 ---
 
@@ -295,6 +372,8 @@ files:
   size: 2GB
 block_size: 1MB
 direct_io: true
+verify: false
+iodepth: 1
 reuse: false
 cleanup: true
 targets:
@@ -321,6 +400,8 @@ pulsar run --path /mnt/storage --profile ./my-profile.yaml
 | `files.distribution` | string | File size distribution: `imagenet` (log-normal ~120KB), `bert` (500MB fixed), `unet` (150MB fixed) |
 | `block_size` | string | I/O block size, human-readable (e.g. `256KB`, `4MB`) |
 | `direct_io` | bool | Use O_DIRECT to bypass page cache (Linux only) |
+| `verify` | bool | Write a deterministic pattern and verify it on each read. Detects silent data corruption. |
+| `iodepth` | int | Concurrent I/O operations per worker via goroutine fan-out. Increases parallelism without adding workers. |
 | `reuse` | bool | Reuse the same files across workers (true) or assign exclusive files (false) |
 | `read_pct` / `write_pct` | int | Read/write ratio for `mixed` workload |
 | `fsync_on_write` | bool | Call `fsync` after each write |
@@ -354,6 +435,17 @@ pulsar run \
 # $? is 0 (pass) or 1 (target missed)
 ```
 
+Add `--output-csv` to collect per-second time-series for archival or dashboarding:
+
+```bash
+pulsar run \
+  --path /mnt/storage \
+  --profile training \
+  --json results.json \
+  --output-csv metrics.csv \
+  --quiet
+```
+
 Example GitHub Actions step:
 
 ```yaml
@@ -374,6 +466,14 @@ Example GitHub Actions step:
 
 ## How it Works
 
+### Pre-flight checks
+
+Before starting any benchmark, Pulsar automatically verifies:
+- **Writability** — creates and removes a small probe file at each target path
+- **Disk space** — checks that free space >= `files.count × files.size + 10%` headroom; fails fast if insufficient
+
+This prevents wasting time on a benchmark that would fail halfway through due to a permissions problem or a nearly-full disk.
+
 ### I/O engine
 
 - Each worker opens its assigned file(s) and loops for the full benchmark duration
@@ -388,6 +488,10 @@ Example GitHub Actions step:
 ### O_DIRECT
 
 On Linux, profiles with `direct_io: true` open files with `O_DIRECT` (`0x4000`). The kernel bypasses the page cache entirely, reads go straight to the storage device. Pulsar allocates 4096-byte aligned buffers and rounds all offsets to 4096-byte boundaries as required. On macOS, O_DIRECT is silently ignored.
+
+### Data verification
+
+When `--verify` is set, Pulsar writes a deterministic byte pattern (based on file offset) during the prepare phase and validates that exact pattern on every read. Any mismatch is reported as a corruption event. This is useful for storage qualification, detecting silent data corruption, and validating new hardware or firmware.
 
 ### Metrics
 

@@ -316,3 +316,31 @@ func TestHumanNum(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// LivePrinter
+// ---------------------------------------------------------------------------
+
+func TestLivePrinter_StartStop(t *testing.T) {
+	lp := NewLivePrinter(5 * time.Second)
+	lp.Start()
+	// Feed a sample
+	lp.Update(measure.MetricSample{T: 1, ReadGBps: 3.5, CPUPct: 30})
+	time.Sleep(50 * time.Millisecond)
+	lp.Stop() // must not panic or deadlock
+}
+
+func TestLivePrinter_StopIdempotent(t *testing.T) {
+	lp := NewLivePrinter(0)
+	lp.Start()
+	lp.Stop()
+	lp.Stop() // second Stop must not panic
+}
+
+func TestLivePrinter_UpdateBeforeStart(t *testing.T) {
+	lp := NewLivePrinter(10 * time.Second)
+	// Update before Start — must not panic
+	lp.Update(measure.MetricSample{T: 0, ReadGBps: 1.0})
+	lp.Start()
+	lp.Stop()
+}

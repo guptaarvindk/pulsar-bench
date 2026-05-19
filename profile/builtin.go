@@ -204,7 +204,7 @@ func thrash() Profile {
 
 	return Profile{
 		Name:        "thrash",
-		Description: "Cache thrash — working set larger than cache, measures cold-path floor",
+		Description: "Cache thrash — working set auto-sized to 2× RAM, measures cold-path floor",
 		Focus:       "Cold-path",
 		Workload:    "random-read",
 		Workers:     32,

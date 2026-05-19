@@ -447,10 +447,11 @@ go test -race ./...
 | `profile` | `profile_test.go` | `ParseSize` (20 cases: SI/IEC/plain int/edge cases) |
 | `profile` | `distribution_test.go` | `GenerateFileSizes` for all distributions; bert/unet respect `baseSizeBytes` |
 | `measure` | `latency_test.go` | `Recorder` (empty/single/percentiles/concurrent/StatsWindow/circular cap), `StallTracker`, `MergeLatencyStats` |
-| `workload` | `targets_test.go` | `checkTargets` (9 cases: all-pass, each target type miss, zero targets) |
+| `workload` | `targets_test.go` | `checkTargets` (9 cases: all-pass, each target type miss, zero targets); `verifyFill`/`verifyCheck` (5 cases: round-trip, corruption detection, cross-block isolation, multiple blocks, large buffer) |
 | `cluster` | `coordinator_test.go` | `mergeLatencyStats` (empty/single/two), coordinator `checkTargets` (6 cases), `mergeResults` (2-node/error/nil) |
-| `cmd` | `cmd_test.go` | `SetVersion`, `LoadBuiltin` all 16 profiles + unknown, `LoadFile` (valid/bad workload/block_size formats/missing workload), `listCmd` output |
-| `report` | `report_test.go` | `buildSummary` fields + pass/fail + epoch/metadata/accelerator/per-node passthrough, `WriteHTML` (create/title/profile/epochs/metadata/samples/invalid path), `humanBytes`, `humanNum` |
+| `cmd` | `cmd_test.go` | `SetVersion`, `LoadBuiltin` all 16 profiles + unknown, `LoadFile` (valid/bad workload/block_size formats/missing workload), `listCmd` output; `loadResult` (valid/invalid JSON), `compareCmd` missing-file error, `runPreflight` (valid path/non-existent dir) |
+| `report` | `report_test.go` | `buildSummary` fields + pass/fail + epoch/metadata/accelerator/per-node passthrough, `WriteHTML` (create/title/profile/epochs/metadata/samples/invalid path), `humanBytes`, `humanNum`; `LivePrinter` (start/stop, idempotent stop, update-before-start) |
+| `report` | `csv_test.go` | `WriteCSV` (empty/single/multi-sample/all-fields, invalid path); `WriteCSVResult` (nil samples no-op) |
 
 ---
 
