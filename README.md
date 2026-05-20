@@ -218,6 +218,10 @@ Each profile defines pass/fail targets. If any target is missed, Pulsar prints `
 |---|---|---|
 | *(positional)* | *(required)* | Two JSON result files: `pulsar compare baseline.json candidate.json` |
 
+### `pulsar version`
+
+Prints the binary version string (injected at build time via `-ldflags "-X main.version=<tag>"`). No flags.
+
 ---
 
 ## Multi-Path (Multiple Drives)

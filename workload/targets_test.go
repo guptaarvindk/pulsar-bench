@@ -151,6 +151,42 @@ func TestCheckTargets_MultipleViolations(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// runWithIODepth — buffer isolation
+// ---------------------------------------------------------------------------
+
+// TestRunWithIODepth_BuffersAreDistinct verifies that each iodepth slot gets
+// its own buffer so concurrent sub-goroutines never share backing memory.
+// The race detector will flag any regression.
+func TestRunWithIODepth_BuffersAreDistinct(t *testing.T) {
+	const depth = 4
+	p := &profile.Profile{BlockSize: 4096, IODepth: depth}
+	w := newWorker("sequential-read", nil, p, 0, nil)
+	if len(w.bufs) != depth {
+		t.Fatalf("expected %d buffers, got %d", depth, len(w.bufs))
+	}
+	// All buf pointers must be distinct.
+	for i := 0; i < len(w.bufs); i++ {
+		for j := i + 1; j < len(w.bufs); j++ {
+			if &w.bufs[i][0] == &w.bufs[j][0] {
+				t.Errorf("bufs[%d] and bufs[%d] share backing array", i, j)
+			}
+		}
+	}
+	// Exercise concurrent writes: each goroutine writes its subID byte into
+	// its own buf. The race detector catches any shared-memory violations.
+	var seen [depth]byte
+	w.runWithIODepth(nil, func(subID int, buf []byte) {
+		buf[0] = byte(subID)
+		seen[subID] = buf[0]
+	})
+	for i := 0; i < depth; i++ {
+		if seen[i] != byte(i) {
+			t.Errorf("subID %d: got %d, want %d", i, seen[i], i)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // verifyFill / verifyCheck
 // ---------------------------------------------------------------------------
 

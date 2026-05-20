@@ -384,7 +384,7 @@ Flags:
 
 pulsar list                           # show all built-in profiles
 pulsar version                        # print version
-pulsar report --input res.json        # render HTML from JSON result file
+pulsar report res.json                # render HTML from JSON result file (positional arg)
 pulsar agent --port 7762              # start agent for multi-node runs
 pulsar compare before.json after.json # diff two result JSON files
 ```

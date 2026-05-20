@@ -512,7 +512,9 @@ func (r *Runner) prepare() error {
 	}
 
 	buf := make([]byte, min64(r.p.BlockSize, 4*1024*1024))
-	// Fill with a non-zero pattern (avoids sparse-file shortcuts on some FS)
+	// Fill with a non-zero pattern (avoids sparse-file shortcuts on some FS).
+	// When verify is enabled the per-block pattern is filled during the write
+	// loop below so this default is only used for non-verify runs.
 	for i := range buf {
 		buf[i] = byte(i % 251)
 	}
@@ -530,9 +532,13 @@ func (r *Runner) prepare() error {
 		r.files = append(r.files, fpath)
 		r.fileSizes = append(r.fileSizes, fileSize)
 
-		// If file already exists with the right size, reuse it (--no-cleanup).
-		if st, err := os.Stat(fpath); err == nil && st.Size() == fileSize {
-			continue
+		// Reuse an existing file only when not in verify mode (we cannot tell
+		// whether an existing file was written with the verify pattern) and when
+		// the size matches exactly.
+		if !r.p.Verify {
+			if st, err := os.Stat(fpath); err == nil && st.Size() == fileSize {
+				continue
+			}
 		}
 
 		f, err := os.Create(fpath)
@@ -540,13 +546,18 @@ func (r *Runner) prepare() error {
 			return err
 		}
 		remaining := fileSize
+		var writeOffset int64
 		for remaining > 0 {
-			n := min64(int64(len(buf)), remaining)
-			if _, err := f.Write(buf[:n]); err != nil {
+			blk := min64(int64(len(buf)), remaining)
+			if r.p.Verify {
+				verifyFill(buf[:blk], i, writeOffset)
+			}
+			if _, err := f.Write(buf[:blk]); err != nil {
 				f.Close()
 				return err
 			}
-			remaining -= n
+			remaining -= blk
+			writeOffset += blk
 		}
 		f.Close()
 	}

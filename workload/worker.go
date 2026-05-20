@@ -20,7 +20,8 @@ type worker struct {
 	p       *profile.Profile
 	id      int
 	rng     *rand.Rand
-	buf     []byte
+	buf     []byte   // primary buffer (iodepth slot 0)
+	bufs    [][]byte // one aligned buffer per iodepth slot — no sharing between goroutines
 	verify  bool
 	iodepth int
 }
@@ -31,32 +32,40 @@ func newWorker(kind string, files []string, p *profile.Profile, id int, rng *ran
 	if iodepth <= 0 {
 		iodepth = 1
 	}
+	// Pre-allocate one buffer per iodepth slot so concurrent sub-goroutines
+	// never share a buffer (which would be a data race).
+	bufs := make([][]byte, iodepth)
+	for i := range bufs {
+		bufs[i] = makeAlignedBuf(sz)
+	}
 	return &worker{
 		kind:    kind,
 		files:   files,
 		p:       p,
 		id:      id,
 		rng:     rng,
-		buf:     makeAlignedBuf(sz),
+		buf:     bufs[0],
+		bufs:    bufs,
 		verify:  p.Verify,
 		iodepth: iodepth,
 	}
 }
 
 // runWithIODepth launches iodepth copies of fn and waits for all to finish.
-// Used to simulate higher I/O queue depth within a single worker.
-func (w *worker) runWithIODepth(ctx context.Context, fn func(subID int)) {
+// Each goroutine receives its own pre-allocated buffer (w.bufs[subID]) so
+// concurrent sub-goroutines never race on a shared buffer.
+func (w *worker) runWithIODepth(ctx context.Context, fn func(subID int, buf []byte)) {
 	if w.iodepth <= 1 {
-		fn(0)
+		fn(0, w.buf)
 		return
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < w.iodepth; i++ {
 		wg.Add(1)
-		i := i
+		i, buf := i, w.bufs[i]
 		go func() {
 			defer wg.Done()
-			fn(i)
+			fn(i, buf)
 		}()
 	}
 	wg.Wait()
@@ -94,7 +103,7 @@ func (w *worker) loopSequentialRead(
 	stall *measure.StallTracker,
 ) {
 	for ctx.Err() == nil {
-		w.runWithIODepth(ctx, func(subID int) {
+		w.runWithIODepth(ctx, func(subID int, buf []byte) {
 			fileIdx := (w.id*w.iodepth + subID) % len(w.files)
 			path := w.files[fileIdx]
 			t0 := time.Now()
@@ -106,7 +115,7 @@ func (w *worker) loopSequentialRead(
 			var offset int64
 			for ctx.Err() == nil {
 				opStart := time.Now()
-				n, err := f.Read(w.buf)
+				n, err := f.Read(buf)
 				ioElapsed := time.Since(opStart)
 				if n > 0 {
 					if firstRead {
@@ -116,7 +125,7 @@ func (w *worker) loopSequentialRead(
 						firstRead = false
 					}
 					if w.verify {
-						if verr := verifyCheck(w.buf[:n], fileIdx, offset); verr != nil {
+						if verr := verifyCheck(buf[:n], fileIdx, offset); verr != nil {
 							fmt.Fprintf(os.Stderr, "verify error: %v\n", verr)
 						}
 					}
@@ -153,7 +162,7 @@ func (w *worker) loopRandomRead(
 	stall *measure.StallTracker,
 ) {
 	for ctx.Err() == nil {
-		w.runWithIODepth(ctx, func(subID int) {
+		w.runWithIODepth(ctx, func(subID int, buf []byte) {
 			fileIdx := (w.id*w.iodepth + subID) % len(w.files)
 			path := w.files[fileIdx]
 			st, err := os.Stat(path)
@@ -176,13 +185,13 @@ func (w *worker) loopRandomRead(
 				return
 			}
 			opStart := time.Now()
-			n, _ := f.Read(w.buf)
+			n, _ := f.Read(buf)
 			ioElapsed := time.Since(opStart)
 			f.Close()
 
 			if n > 0 {
 				if w.verify {
-					if verr := verifyCheck(w.buf[:n], fileIdx, offset); verr != nil {
+					if verr := verifyCheck(buf[:n], fileIdx, offset); verr != nil {
 						fmt.Fprintf(os.Stderr, "verify error: %v\n", verr)
 					}
 				}
@@ -424,34 +433,63 @@ func (w *worker) doSingleWrite(tp *measure.Throughput, opLat *measure.Recorder) 
 	return ioElapsed
 }
 
-// verifyFill writes a deterministic repeating pattern into buf.
-// Pattern is based on fileIndex and blockOffset so each block has a unique value.
-func verifyFill(buf []byte, fileIndex int, blockOffset int64) {
-	seed := uint64(fileIndex)*0x9e3779b97f4a7c15 + uint64(blockOffset)*0x6c62272e07bb0142
-	for i := 0; i+8 <= len(buf); i += 8 {
-		seed ^= seed >> 12
-		seed ^= seed << 25
-		seed ^= seed >> 27
-		buf[i] = byte(seed)
-		buf[i+1] = byte(seed >> 8)
-		buf[i+2] = byte(seed >> 16)
-		buf[i+3] = byte(seed >> 24)
-		buf[i+4] = byte(seed >> 32)
-		buf[i+5] = byte(seed >> 40)
-		buf[i+6] = byte(seed >> 48)
-		buf[i+7] = byte(seed >> 56)
+// verifyFill writes a deterministic pattern into buf starting at startOffset.
+//
+// Each byte at absolute file position P belongs to the 8-byte chunk whose
+// start is P&^7.  The chunk's 8 bytes are derived from a single XorShift64
+// keyed on (fileIndex, chunkStart), so the pattern is fully byte-addressable:
+// any sub-range of the file can be verified regardless of alignment.
+//
+// Fast path: when startOffset and len(buf) are both 8-byte aligned the inner
+// loop processes 8 bytes per iteration.  The slower per-byte path handles the
+// (rare) unaligned case that arises on non-Linux where alignedOffset is a
+// no-op.
+func verifyFill(buf []byte, fileIndex int, startOffset int64) {
+	fi := uint64(fileIndex) * 0x9e3779b97f4a7c15
+	abs := uint64(startOffset)
+
+	chunkSeed := func(chunkStart uint64) uint64 {
+		s := fi ^ chunkStart*0x6c62272e07bb0142
+		s ^= s >> 12
+		s ^= s << 25
+		s ^= s >> 27
+		return s
+	}
+
+	if abs&7 == 0 && len(buf)&7 == 0 {
+		// Aligned fast path
+		for i := 0; i < len(buf); i += 8 {
+			seed := chunkSeed(abs + uint64(i))
+			buf[i] = byte(seed)
+			buf[i+1] = byte(seed >> 8)
+			buf[i+2] = byte(seed >> 16)
+			buf[i+3] = byte(seed >> 24)
+			buf[i+4] = byte(seed >> 32)
+			buf[i+5] = byte(seed >> 40)
+			buf[i+6] = byte(seed >> 48)
+			buf[i+7] = byte(seed >> 56)
+		}
+		return
+	}
+
+	// General path: per-byte (handles any start/length alignment)
+	for i := range buf {
+		absPos := abs + uint64(i)
+		chunkStart := absPos &^ 7
+		seed := chunkSeed(chunkStart)
+		buf[i] = byte(seed >> ((absPos & 7) * 8))
 	}
 }
 
-// verifyCheck checks buf against the expected pattern.
-// Returns an error if any byte is wrong.
-func verifyCheck(buf []byte, fileIndex int, blockOffset int64) error {
+// verifyCheck checks buf against the expected pattern starting at startOffset.
+// Returns an error describing the first corrupted byte found.
+func verifyCheck(buf []byte, fileIndex int, startOffset int64) error {
 	expected := make([]byte, len(buf))
-	verifyFill(expected, fileIndex, blockOffset)
+	verifyFill(expected, fileIndex, startOffset)
 	for i := range buf {
 		if buf[i] != expected[i] {
 			return fmt.Errorf("corruption at file %d offset %d+%d: got %02x want %02x",
-				fileIndex, blockOffset, i, buf[i], expected[i])
+				fileIndex, startOffset, i, buf[i], expected[i])
 		}
 	}
 	return nil
