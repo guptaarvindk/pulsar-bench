@@ -36,6 +36,7 @@ var (
 	flagIODepth     int
 	flagOutputCSV   string
 	flagSteadyState bool
+	flagBlockSize   string
 )
 
 var runCmd = &cobra.Command{
@@ -118,6 +119,13 @@ var runCmd = &cobra.Command{
 		}
 		if cmd.Flags().Changed("iodepth") {
 			p.IODepth = flagIODepth
+		}
+		if flagBlockSize != "" {
+			bs, parseErr := profile.ParseSize(flagBlockSize)
+			if parseErr != nil {
+				return fmt.Errorf("--block-size %q: %w", flagBlockSize, parseErr)
+			}
+			p.BlockSize = bs
 		}
 
 		// Resolve and validate all paths
@@ -226,6 +234,7 @@ func init() {
 	runCmd.Flags().IntVar(&flagIODepth, "iodepth", 0, "I/O queue depth per worker (0=1, higher=more concurrent I/Os per worker)")
 	runCmd.Flags().StringVar(&flagOutputCSV, "output-csv", "", "Write per-second time-series to this CSV file")
 	runCmd.Flags().BoolVar(&flagSteadyState, "steady-state", false, "Run until throughput stabilizes (CV<2% for 10s) rather than fixed duration")
+	runCmd.Flags().StringVar(&flagBlockSize, "block-size", "", "I/O block size, e.g. 4KB, 64KB, 1MB (overrides profile)")
 }
 
 // runPreflight checks that the target path is ready before the benchmark starts.
