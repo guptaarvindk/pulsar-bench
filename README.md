@@ -218,6 +218,15 @@ Each profile defines pass/fail targets. If any target is missed, Pulsar prints `
 |---|---|---|
 | *(positional)* | *(required)* | Two JSON result files: `pulsar compare baseline.json candidate.json` |
 
+### `pulsar sweep`
+
+| Flag | Default | Description |
+|---|---|---|
+| *(positional)* | *(required)* | Two or more JSON result files |
+| `--output` / `-o` | `<first-stem>_sweep.html` | Output HTML file |
+| `--title` | *(auto from profile)* | Chart title |
+| `--label` | *(auto from block_size_bytes)* | Override label for each input (repeat once per file) |
+
 ### `pulsar version`
 
 Prints the binary version string (injected at build time via `-ldflags "-X main.version=<tag>"`). No flags.
@@ -307,6 +316,28 @@ The report includes:
 - Target pass/fail summary
 
 Charts use [Chart.js](https://www.chartjs.org/) embedded inline — no internet connection required to view the report.
+
+### Block-Size Sweep Chart
+
+Run the same workload at multiple block sizes and visualise all results in one HTML page:
+
+```bash
+pulsar run --path /mnt/nvme --profile llm-inference --block-size 4KB   --json bs_4k.json
+pulsar run --path /mnt/nvme --profile llm-inference --block-size 64KB  --json bs_64k.json
+pulsar run --path /mnt/nvme --profile llm-inference --block-size 512KB --json bs_512k.json
+pulsar run --path /mnt/nvme --profile llm-inference --block-size 4MB   --json bs_4m.json
+
+pulsar sweep bs_4k.json bs_64k.json bs_512k.json bs_4m.json --output sweep.html
+```
+
+The sweep chart includes:
+- **TTFB p99 bar chart** with 2 ms target line
+- **Read throughput bar chart**
+- **Op latency p99 bar chart** with 2 ms target line
+- **TTFB p50 vs p99 line chart**
+- **Full results table** with green/red colour coding against the 2 ms target
+
+Block sizes are auto-labelled from `block_size_bytes` in the result JSON (e.g. "64 KiB"). Use `--label` to override.
 
 ---
 

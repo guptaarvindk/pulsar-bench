@@ -22,10 +22,11 @@ type Result struct {
 	Profile      string                `json:"profile"`
 	WorkloadType string                `json:"workload_type"`
 	Path         string                `json:"path"`
-	Workers      int                   `json:"workers"`
-	DirectIO     bool                  `json:"direct_io"`
-	Verify       bool                  `json:"verify"`
-	DurationS    float64               `json:"duration_s"`
+	Workers       int                   `json:"workers"`
+	DirectIO      bool                  `json:"direct_io"`
+	Verify        bool                  `json:"verify"`
+	BlockSizeBytes int64                `json:"block_size_bytes"`
+	DurationS     float64               `json:"duration_s"`
 	StartedAt    time.Time             `json:"started_at"`
 	FinishedAt   time.Time             `json:"finished_at"`
 
@@ -130,14 +131,15 @@ func NewRunner(paths []string, p *profile.Profile, quiet bool) *Runner {
 func (r *Runner) Run() (*Result, error) {
 	// Use first path for backwards-compatible Path field
 	result := &Result{
-		Profile:      r.p.Name,
-		WorkloadType: r.p.Workload,
-		Path:         r.paths[0],
-		Workers:      r.p.Workers,
-		DirectIO:     r.p.DirectIO,
-		Verify:       r.p.Verify,
-		StartedAt:    time.Now(),
-		Targets:      r.p.Targets,
+		Profile:        r.p.Name,
+		WorkloadType:   r.p.Workload,
+		Path:           r.paths[0],
+		Workers:        r.p.Workers,
+		DirectIO:       r.p.DirectIO,
+		Verify:         r.p.Verify,
+		BlockSizeBytes: r.p.BlockSize,
+		StartedAt:      time.Now(),
+		Targets:        r.p.Targets,
 	}
 
 	// --- Phase 1: Prepare test data ---
