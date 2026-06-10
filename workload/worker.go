@@ -102,6 +102,7 @@ func (w *worker) loopSequentialRead(
 	opLat *measure.Recorder,
 	stall *measure.StallTracker,
 ) {
+	batchTarget := w.p.BatchSizeBytes
 	for ctx.Err() == nil {
 		w.runWithIODepth(ctx, func(subID int, buf []byte) {
 			fileIdx := (w.id*w.iodepth + subID) % len(w.files)
@@ -113,6 +114,12 @@ func (w *worker) loopSequentialRead(
 			}
 			firstRead := true
 			var offset int64
+			// Accumulate I/O time per simulated training batch. Once a batch's
+			// worth of bytes has been read, record that batch's I/O time and run
+			// one compute gap (GPU step) — so the stall metric compares per-batch
+			// I/O against per-batch compute, the way a DataLoader actually feeds.
+			var batchIO time.Duration
+			var batchRead int64
 			for ctx.Err() == nil {
 				opStart := time.Now()
 				n, err := f.Read(buf)
@@ -135,8 +142,15 @@ func (w *worker) loopSequentialRead(
 					if opLat != nil {
 						opLat.Record(ioElapsed)
 					}
-					if stall != nil {
-						stall.AddIO(ioElapsed)
+					batchIO += ioElapsed
+					batchRead += int64(n)
+					if batchTarget > 0 && batchRead >= batchTarget {
+						if stall != nil {
+							stall.AddIO(batchIO)
+						}
+						w.computeGap(stall)
+						batchIO = 0
+						batchRead = 0
 					}
 					offset += int64(n)
 				}
@@ -144,11 +158,15 @@ func (w *worker) loopSequentialRead(
 					break
 				}
 			}
+			// Flush a trailing partial batch as one final batch + GPU step.
+			if batchRead > 0 {
+				if stall != nil {
+					stall.AddIO(batchIO)
+				}
+				w.computeGap(stall)
+			}
 			f.Close()
 		})
-		w.computeGap(stall)
-		// Advance to next file set after each outer pass
-		// (when iodepth==1 this matches the original idx++ behaviour)
 	}
 }
 
@@ -161,8 +179,19 @@ func (w *worker) loopRandomRead(
 	opLat *measure.Recorder,
 	stall *measure.StallTracker,
 ) {
+	// Accumulate I/O time per simulated training batch across many random
+	// reads, then run one compute gap (GPU step) per batch — so the stall
+	// metric compares per-batch I/O against per-batch compute. Each sub-reader
+	// records into its own slot to stay race-free under iodepth.
+	batchTarget := w.p.BatchSizeBytes
+	var batchIO time.Duration
+	var batchRead int64
+	subIO := make([]time.Duration, w.iodepth)
+	subN := make([]int64, w.iodepth)
 	for ctx.Err() == nil {
 		w.runWithIODepth(ctx, func(subID int, buf []byte) {
+			subIO[subID] = 0
+			subN[subID] = 0
 			fileIdx := (w.id*w.iodepth + subID) % len(w.files)
 			path := w.files[fileIdx]
 			st, err := os.Stat(path)
@@ -204,12 +233,22 @@ func (w *worker) loopRandomRead(
 				if tp != nil {
 					tp.AddRead(int64(n))
 				}
-				if stall != nil {
-					stall.AddIO(ioElapsed)
-				}
+				subIO[subID] = ioElapsed
+				subN[subID] = int64(n)
 			}
 		})
-		w.computeGap(stall)
+		for i := 0; i < w.iodepth; i++ {
+			batchIO += subIO[i]
+			batchRead += subN[i]
+		}
+		if batchTarget > 0 && batchRead >= batchTarget {
+			if stall != nil {
+				stall.AddIO(batchIO)
+			}
+			w.computeGap(stall)
+			batchIO = 0
+			batchRead = 0
+		}
 	}
 }
 
