@@ -3,6 +3,8 @@ package cluster
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -91,7 +93,15 @@ func (a *Agent) handleStart(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(delay)
 		}
 
-		runner := workload.NewRunner(cfg.Paths, &cfg.Profile, true)
+		// Namespace each path with this node's hostname so every agent in a
+		// multi-node run writes unique object keys (no cross-node collision).
+		host, _ := os.Hostname()
+		paths := make([]string, len(cfg.Paths))
+		for i, p := range cfg.Paths {
+			paths[i] = filepath.Join(p, host)
+		}
+
+		runner := workload.NewRunner(paths, &cfg.Profile, true)
 		result, err := runner.Run()
 
 		a.mu.Lock()
