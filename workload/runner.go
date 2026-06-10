@@ -513,17 +513,14 @@ func (r *Runner) prepare() error {
 		}
 	}
 
-	buf := make([]byte, min64(r.p.BlockSize, 4*1024*1024))
-	// Fill with a non-zero pattern (avoids sparse-file shortcuts on some FS).
-	// When verify is enabled the per-block pattern is filled during the write
-	// loop below so this default is only used for non-verify runs.
-	for i := range buf {
-		buf[i] = byte(i % 251)
-	}
-
 	r.files = make([]string, 0, totalFiles)
 	r.fileSizes = make([]int64, 0, totalFiles)
 
+	// Build the file list, then create missing files with a pool of
+	// concurrent writers. Creation parallelism matters on network/object-store
+	// mounts where each close() blocks on a commit: writing one file at a time
+	// leaves the upload pipeline idle between closes.
+	var toCreate []int
 	for i := 0; i < totalFiles; i++ {
 		pathIdx := i % n
 		pth := r.paths[pathIdx]
@@ -542,28 +539,85 @@ func (r *Runner) prepare() error {
 				continue
 			}
 		}
+		toCreate = append(toCreate, i)
+	}
+	if len(toCreate) == 0 {
+		return nil
+	}
 
-		f, err := os.Create(fpath)
-		if err != nil {
+	writers := r.p.Workers
+	if writers > len(toCreate) {
+		writers = len(toCreate)
+	}
+	if writers < 1 {
+		writers = 1
+	}
+
+	idxCh := make(chan int)
+	errCh := make(chan error, writers)
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Per-writer buffer: verifyFill mutates it, and even the static
+			// pattern must not be shared once any writer runs in verify mode.
+			buf := make([]byte, min64(r.p.BlockSize, 4*1024*1024))
+			for i := range buf {
+				buf[i] = byte(i % 251)
+			}
+			for i := range idxCh {
+				if err := r.writeTestFile(i, buf); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+
+	var firstErr error
+	for _, i := range toCreate {
+		select {
+		case err := <-errCh:
+			firstErr = err
+		case idxCh <- i:
+			continue
+		}
+		break
+	}
+	close(idxCh)
+	wg.Wait()
+	if firstErr == nil {
+		select {
+		case firstErr = <-errCh:
+		default:
+		}
+	}
+	return firstErr
+}
+
+// writeTestFile creates and fills test file i (path and size already recorded
+// in r.files / r.fileSizes by prepare).
+func (r *Runner) writeTestFile(i int, buf []byte) error {
+	f, err := os.Create(r.files[i])
+	if err != nil {
+		return err
+	}
+	remaining := r.fileSizes[i]
+	var writeOffset int64
+	for remaining > 0 {
+		blk := min64(int64(len(buf)), remaining)
+		if r.p.Verify {
+			verifyFill(buf[:blk], i, writeOffset)
+		}
+		if _, err := f.Write(buf[:blk]); err != nil {
+			f.Close()
 			return err
 		}
-		remaining := fileSize
-		var writeOffset int64
-		for remaining > 0 {
-			blk := min64(int64(len(buf)), remaining)
-			if r.p.Verify {
-				verifyFill(buf[:blk], i, writeOffset)
-			}
-			if _, err := f.Write(buf[:blk]); err != nil {
-				f.Close()
-				return err
-			}
-			remaining -= blk
-			writeOffset += blk
-		}
-		f.Close()
+		remaining -= blk
+		writeOffset += blk
 	}
-	return nil
+	return f.Close()
 }
 
 func (r *Runner) cleanup() {
