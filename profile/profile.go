@@ -66,6 +66,14 @@ type Profile struct {
 	NumAccelerators int   `yaml:"num_accelerators"` // simulated GPU/TPU count
 	SampleSizeBytes int64 `yaml:"sample_size_bytes"` // bytes per training sample
 
+	// BatchSizeBytes is the data read per simulated training batch. I/O time is
+	// accumulated per batch and paired with one ComputeGapMs sleep, so the
+	// GPU-stall metric compares per-batch I/O time against per-batch compute
+	// time (mirroring a DataLoader: fetch a batch → GPU step → fetch next).
+	// Defaults to 16× the block size (min 4 MiB) when unset.
+	BatchSizeBytes int64  `yaml:"batch_size_bytes"`
+	BatchSizeHuman string `yaml:"batch_size"` // YAML: "8MB", "16MiB", etc.
+
 	// Misc
 	Seed    int64 `yaml:"seed"`
 	// Verify: if true, write a deterministic pattern and verify it on each read.
@@ -153,6 +161,19 @@ func (p *Profile) validate() error {
 	}
 	if p.BlockSize == 0 {
 		p.BlockSize = 256 * 1024 // 256 KiB default
+	}
+	if p.BatchSizeHuman != "" && p.BatchSizeBytes == 0 {
+		sz, err := ParseSize(p.BatchSizeHuman)
+		if err != nil {
+			return fmt.Errorf("batch_size %q: %w", p.BatchSizeHuman, err)
+		}
+		p.BatchSizeBytes = sz
+	}
+	if p.BatchSizeBytes == 0 {
+		p.BatchSizeBytes = 16 * p.BlockSize
+		if p.BatchSizeBytes < 4<<20 {
+			p.BatchSizeBytes = 4 << 20
+		}
 	}
 	if p.Epochs == 0 {
 		p.Epochs = 2

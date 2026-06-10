@@ -11,6 +11,7 @@ import (
 
 	"github.com/minio/pulsar/measure"
 	"github.com/minio/pulsar/profile"
+	"github.com/minio/pulsar/report"
 	"github.com/minio/pulsar/workload"
 )
 
@@ -85,17 +86,37 @@ func (c *Coordinator) Run() (*workload.Result, error) {
 		}
 	}
 
-	// 4. Collect results from all nodes (streaming NDJSON)
+	// 4. Collect results from all nodes (streaming NDJSON), rendering a live
+	//    cluster-aggregate line as per-second samples arrive from each node.
+	var lp *report.LivePrinter
+	if !c.Quiet {
+		lp = report.NewLivePrinter(c.Profile.Duration)
+		lp.Start()
+	}
+	latest := make([]measure.MetricSample, n)
+	var amu sync.Mutex
 	outcomes := make([]nodeOutcome, n)
 	for i, node := range c.Nodes {
 		wg.Add(1)
 		go func(i int, node NodeAddr) {
 			defer wg.Done()
-			samples, result, err := streamNode(string(node))
-			outcomes[i] = nodeOutcome{samples, result, err}
+			result, err := streamNode(string(node), func(s measure.MetricSample) {
+				if lp == nil {
+					return
+				}
+				amu.Lock()
+				latest[i] = s
+				merged := mergeLiveSamples(latest)
+				amu.Unlock()
+				lp.Update(merged)
+			})
+			outcomes[i] = nodeOutcome{result, err}
 		}(i, node)
 	}
 	wg.Wait()
+	if lp != nil {
+		lp.Stop()
+	}
 
 	// 5. Merge results
 	return mergeResults(c.Nodes, outcomes, c.Profile)
@@ -162,14 +183,13 @@ func sendReset(node string) error {
 	return nil
 }
 
-func streamNode(node string) ([]measure.MetricSample, *workload.Result, error) {
+func streamNode(node string, onLive func(measure.MetricSample)) (*workload.Result, error) {
 	resp, err := streamClient.Get("http://" + node + "/api/stream")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	var samples []measure.MetricSample
 	var result *workload.Result
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
@@ -179,25 +199,63 @@ func streamNode(node string) ([]measure.MetricSample, *workload.Result, error) {
 			continue
 		}
 		if msg.Error != "" {
-			return nil, nil, fmt.Errorf("node error: %s", msg.Error)
+			return nil, fmt.Errorf("node error: %s", msg.Error)
 		}
-		if msg.Sample != nil {
-			samples = append(samples, *msg.Sample)
+		if msg.Sample != nil && onLive != nil {
+			onLive(*msg.Sample)
 		}
 		if msg.Result != nil {
 			result = msg.Result
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return samples, result, nil
+	return result, nil
 }
 
 type nodeOutcome struct {
-	samples []measure.MetricSample
-	result  *workload.Result
-	err     error
+	result *workload.Result
+	err    error
+}
+
+// mergeLiveSamples combines the latest per-node sample into one cluster
+// aggregate for the live display: throughput and IOPS sum across nodes,
+// latency percentiles take the worst (max), CPU is averaged, T is the max.
+func mergeLiveSamples(latest []measure.MetricSample) measure.MetricSample {
+	var m measure.MetricSample
+	var cpuSum float64
+	var cpuN int
+	for _, s := range latest {
+		m.ReadGBps += s.ReadGBps
+		m.WriteGBps += s.WriteGBps
+		m.ReadIOPS += s.ReadIOPS
+		m.WriteIOPS += s.WriteIOPS
+		m.MemMB += s.MemMB
+		if s.TTFBP50Ms > m.TTFBP50Ms {
+			m.TTFBP50Ms = s.TTFBP50Ms
+		}
+		if s.TTFBP99Ms > m.TTFBP99Ms {
+			m.TTFBP99Ms = s.TTFBP99Ms
+		}
+		if s.OpP50Ms > m.OpP50Ms {
+			m.OpP50Ms = s.OpP50Ms
+		}
+		if s.OpP99Ms > m.OpP99Ms {
+			m.OpP99Ms = s.OpP99Ms
+		}
+		if s.T > m.T {
+			m.T = s.T
+		}
+		if s.CPUPct > 0 {
+			cpuSum += s.CPUPct
+			cpuN++
+		}
+	}
+	if cpuN > 0 {
+		m.CPUPct = cpuSum / float64(cpuN)
+	}
+	return m
 }
 
 func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) (*workload.Result, error) {
@@ -245,7 +303,7 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 		}
 		allLatStats = append(allLatStats, r.TTFB)
 		allOpStats = append(allOpStats, r.OpLatency)
-		allSamples = append(allSamples, o.samples...)
+		allSamples = append(allSamples, r.Samples...)
 
 		perNode[i] = workload.NodeResult{
 			Node:       string(nodes[i]),
