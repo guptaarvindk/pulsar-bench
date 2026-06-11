@@ -3,6 +3,7 @@ package measure
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -11,14 +12,14 @@ import (
 
 const maxSamples = 1_000_000
 
-// Recorder collects raw latency samples from concurrent workers in a
-// lock-free manner and computes percentile distributions on demand.
-// samples is a circular buffer capped at maxSamples to prevent OOM on
-// long runs. winSamples accumulates samples since the last StatsWindow
+// Recorder collects raw latency samples from concurrent workers and
+// computes percentile distributions on demand.
+// samples is a reservoir capped at maxSamples to prevent OOM on long
+// runs. winSamples accumulates samples since the last StatsWindow
 // call and is reset on each call.
 type Recorder struct {
 	mu         sync.Mutex
-	samples    []float64 // circular buffer, capped at maxSamples
+	samples    []float64 // reservoir, capped at maxSamples
 	total      int64     // total ever recorded (may exceed len(samples))
 	winSamples []float64 // samples since last StatsWindow call; reset each call
 }
@@ -30,10 +31,18 @@ func (r *Recorder) Record(d time.Duration) {
 	r.total++
 	if int64(len(r.samples)) < maxSamples {
 		r.samples = append(r.samples, ms)
-	} else {
-		r.samples[r.total%maxSamples] = ms // circular overwrite
+	} else if j := rand.Int63n(r.total); j < maxSamples {
+		// Reservoir sampling (Algorithm R): keep a uniform random subset of
+		// the whole run. The previous circular overwrite retained only the
+		// most recent maxSamples ops, so final percentiles silently became a
+		// recency-biased window instead of whole-run statistics.
+		r.samples[j] = ms
 	}
-	r.winSamples = append(r.winSamples, ms)
+	// Cap the window buffer too: if no Sampler is draining it via
+	// StatsWindow (e.g. epoch runs), it would otherwise grow unboundedly.
+	if int64(len(r.winSamples)) < maxSamples {
+		r.winSamples = append(r.winSamples, ms)
+	}
 	r.mu.Unlock()
 }
 
