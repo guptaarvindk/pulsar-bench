@@ -393,10 +393,24 @@ func checkTargets(res *workload.Result, p *profile.Profile) ([]string, int) {
 		fmt.Sprintf("read throughput %.2f GB/s < target %.2f GB/s", res.Throughput.ReadGBps, t.ReadGBps))
 	check(t.WriteGBps > 0 && res.Throughput.WriteGBps < t.WriteGBps,
 		fmt.Sprintf("write throughput %.2f GB/s < target %.2f GB/s", res.Throughput.WriteGBps, t.WriteGBps))
-	check(t.TTFBColdP99Ms > 0 && res.TTFB.P99Ms > t.TTFBColdP99Ms,
-		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBColdP99Ms))
-	check(t.TTFBWarmP99Ms > 0 && res.TTFB.P99Ms > t.TTFBWarmP99Ms && res.Epochs != nil,
-		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBWarmP99Ms))
+	// Same epoch-aware cold/warm logic as workload.Runner.checkTargets:
+	// merged p99 mixes cold and warm opens, so the warm target must be
+	// checked against the last (warm) epoch and the cold target against
+	// the first epoch when epoch data exists.
+	ttfbColdP99 := res.TTFB.P99Ms
+	var ttfbWarmP99 float64
+	hasWarm := false
+	if len(res.Epochs) > 0 {
+		ttfbColdP99 = res.Epochs[0].TTFB.P99Ms
+		if len(res.Epochs) > 1 {
+			ttfbWarmP99 = res.Epochs[len(res.Epochs)-1].TTFB.P99Ms
+			hasWarm = true
+		}
+	}
+	check(t.TTFBColdP99Ms > 0 && ttfbColdP99 > t.TTFBColdP99Ms,
+		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", ttfbColdP99, t.TTFBColdP99Ms))
+	check(t.TTFBWarmP99Ms > 0 && hasWarm && ttfbWarmP99 > t.TTFBWarmP99Ms,
+		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", ttfbWarmP99, t.TTFBWarmP99Ms))
 	if res.Metadata != nil {
 		check(t.StatP99Ms > 0 && res.Metadata.StatP99Ms > t.StatP99Ms,
 			fmt.Sprintf("stat p99 %.1fms > target %.0fms", res.Metadata.StatP99Ms, t.StatP99Ms))

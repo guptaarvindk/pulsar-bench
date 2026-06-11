@@ -681,10 +681,25 @@ func (r *Runner) checkTargets(res *Result) ([]string, int) {
 		fmt.Sprintf("read throughput %.2f GB/s < target %.2f GB/s", res.Throughput.ReadGBps, t.ReadGBps))
 	check(t.WriteGBps > 0 && res.Throughput.WriteGBps < t.WriteGBps,
 		fmt.Sprintf("write throughput %.2f GB/s < target %.2f GB/s", res.Throughput.WriteGBps, t.WriteGBps))
-	check(t.TTFBColdP99Ms > 0 && res.TTFB.P99Ms > t.TTFBColdP99Ms,
-		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBColdP99Ms))
-	check(t.TTFBWarmP99Ms > 0 && res.TTFB.P99Ms > t.TTFBWarmP99Ms && res.Epochs != nil,
-		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBWarmP99Ms))
+	// Cold/warm TTFB must be checked against the matching epoch, not the
+	// merged distribution: merged p99 is dominated by cold-epoch outliers,
+	// so checking it against the (much tighter) warm target produced false
+	// failures, and checking it against the cold target diluted cold opens
+	// with warm ones in multi-epoch runs.
+	ttfbColdP99 := res.TTFB.P99Ms
+	var ttfbWarmP99 float64
+	hasWarm := false
+	if len(res.Epochs) > 0 {
+		ttfbColdP99 = res.Epochs[0].TTFB.P99Ms
+		if len(res.Epochs) > 1 {
+			ttfbWarmP99 = res.Epochs[len(res.Epochs)-1].TTFB.P99Ms
+			hasWarm = true
+		}
+	}
+	check(t.TTFBColdP99Ms > 0 && ttfbColdP99 > t.TTFBColdP99Ms,
+		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", ttfbColdP99, t.TTFBColdP99Ms))
+	check(t.TTFBWarmP99Ms > 0 && hasWarm && ttfbWarmP99 > t.TTFBWarmP99Ms,
+		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", ttfbWarmP99, t.TTFBWarmP99Ms))
 	if res.Metadata != nil {
 		check(t.StatP99Ms > 0 && res.Metadata.StatP99Ms > t.StatP99Ms,
 			fmt.Sprintf("stat p99 %.1fms > target %.0fms", res.Metadata.StatP99Ms, t.StatP99Ms))
