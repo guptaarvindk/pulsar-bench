@@ -404,6 +404,11 @@ func (w *worker) loopAgentWorkspace(
 			os.Rename(src, dst)
 			os.Rename(dst, src)
 			ioElapsed = time.Since(t0)
+			// Record rename latency like every other branch — leaving it out
+			// silently dropped ~10% of ops from the op-latency distribution.
+			if opLat != nil {
+				opLat.Record(ioElapsed)
+			}
 		default:
 			t0 := time.Now()
 			f, err := os.Open(dir)
