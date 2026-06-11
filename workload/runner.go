@@ -129,6 +129,24 @@ func NewRunner(paths []string, p *profile.Profile, quiet bool) *Runner {
 }
 
 func (r *Runner) Run() (*Result, error) {
+	// Guard: the GPU-stall metric pairs per-batch I/O time with one compute
+	// gap. If a compute gap is configured but no batch size, the whole file
+	// is flushed as a single batch against a single gap and the stall figure
+	// saturates near 100% regardless of storage speed. Apply the same default
+	// as profile.validate() and tell the user.
+	if r.p.ComputeGapMs > 0 && r.p.BatchSizeBytes <= 0 {
+		bs := 16 * r.p.BlockSize
+		if bs < 4<<20 {
+			bs = 4 << 20
+		}
+		r.p.BatchSizeBytes = bs
+		if !r.quiet {
+			fmt.Fprintf(os.Stderr,
+				"warning: compute_gap_ms is set but batch_size_bytes is not; defaulting batch to %s so the GPU-stall metric is meaningful\n",
+				humanBytes(bs))
+		}
+	}
+
 	// Use first path for backwards-compatible Path field
 	result := &Result{
 		Profile:        r.p.Name,

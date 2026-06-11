@@ -185,10 +185,17 @@ func (p *Profile) validate() error {
 }
 
 // LoadBuiltin returns a copy of the named built-in profile.
+// The copy is run through validate() so built-ins get the same defaults as
+// YAML profiles — in particular the BatchSizeBytes fallback, without which a
+// profile that sets ComputeGapMs would accumulate a whole file as one batch
+// and report a meaningless ~100% GPU-stall figure.
 func LoadBuiltin(name string) (*Profile, error) {
 	for _, p := range Builtin() {
 		if p.Name == name {
 			cp := p
+			if err := cp.validate(); err != nil {
+				return nil, fmt.Errorf("builtin profile %q: %w", name, err)
+			}
 			return &cp, nil
 		}
 	}
