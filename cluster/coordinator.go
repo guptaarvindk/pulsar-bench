@@ -359,11 +359,14 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 	merged.PerNode = perNode
 	merged.Samples = allSamples
 
-	// Accelerator stats
-	if p.NumAccelerators > 0 && p.SampleSizeBytes > 0 && merged.DurationS > 0 {
+	// Accelerator stats — computed over the measurement window (ElapsedS),
+	// not DurationS which includes each node's prepare and warmup phases
+	// and would understate samples/sec (the bytes numerator only counts
+	// measurement-phase reads).
+	if p.NumAccelerators > 0 && p.SampleSizeBytes > 0 && merged.Throughput.ElapsedS > 0 {
 		merged.Accelerator = &workload.AcceleratorStats{
 			NumAccelerators: p.NumAccelerators,
-			SamplesPerSec:   float64(merged.Throughput.BytesRead) / merged.DurationS / float64(p.SampleSizeBytes),
+			SamplesPerSec:   float64(merged.Throughput.BytesRead) / merged.Throughput.ElapsedS / float64(p.SampleSizeBytes),
 		}
 	}
 

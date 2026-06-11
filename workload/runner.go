@@ -272,10 +272,15 @@ func (r *Runner) Run() (*Result, error) {
 	result.DurationS = result.FinishedAt.Sub(result.StartedAt).Seconds()
 
 	// --- Accelerator stats ---
-	if r.p.NumAccelerators > 0 && r.p.SampleSizeBytes > 0 && result.DurationS > 0 {
+	// Samples/sec must be computed over the measurement window only.
+	// DurationS spans the whole Run() including the prepare (file layout)
+	// and warmup phases, which can dominate wall time (e.g. creating 50k
+	// files) and would understate samples/sec by that factor — but the
+	// BytesRead numerator only counts measurement-phase reads.
+	if r.p.NumAccelerators > 0 && r.p.SampleSizeBytes > 0 && result.Throughput.ElapsedS > 0 {
 		result.Accelerator = &AcceleratorStats{
 			NumAccelerators: r.p.NumAccelerators,
-			SamplesPerSec:   float64(result.Throughput.BytesRead) / result.DurationS / float64(r.p.SampleSizeBytes),
+			SamplesPerSec:   float64(result.Throughput.BytesRead) / result.Throughput.ElapsedS / float64(r.p.SampleSizeBytes),
 		}
 	}
 
