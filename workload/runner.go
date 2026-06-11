@@ -252,9 +252,15 @@ func (r *Runner) Run() (*Result, error) {
 			if r.steadyState {
 				go watchSteadyState(measCtx, measCancel, sampler)
 			}
+			// Use measured wall time, not the configured duration: steady-state
+			// mode cancels the window early (configured duration would understate
+			// bandwidth) and workers can overrun the deadline by one in-flight op
+			// (configured duration would overstate it).
+			measStart := time.Now()
 			r.runWorkers(measCtx, throughput, ttfb, opLat, stall)
+			elapsed := time.Since(measStart)
 			sampler.Stop()
-			result.Throughput = throughput.Stats(r.p.Duration)
+			result.Throughput = throughput.Stats(elapsed)
 			result.TTFB = ttfb.Stats()
 			result.OpLatency = opLat.Stats()
 			result.GPUStallPct = stall.StallPct()
@@ -302,6 +308,7 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 	}
 
 	var wg sync.WaitGroup
+	runStart := time.Now()
 	for i, pth := range r.paths {
 		wg.Add(1)
 		i, pth := i, pth
@@ -327,12 +334,15 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 			subP.Workers = workersPerPath
 			subRunner.p = &subP
 
+			// Measured wall time, not configured duration (see Run).
+			t0 := time.Now()
 			subRunner.runWorkers(ctx, tp, ttfb, opLat, stall)
+			elapsed := time.Since(t0)
 			sampler.Stop()
 
 			pr := PathResult{
 				Path:       pth,
-				Throughput: tp.Stats(r.p.Duration),
+				Throughput: tp.Stats(elapsed),
 				TTFB:       ttfb.Stats(),
 				OpLatency:  opLat.Stats(),
 				Samples:    sampler.Samples(),
@@ -364,7 +374,10 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 		totalReadOps += o.pr.Throughput.ReadOps
 		totalWriteOps += o.pr.Throughput.WriteOps
 	}
-	secs := r.p.Duration.Seconds()
+	// Measured wall time of the whole multi-path phase, not the configured
+	// duration: paths can finish early (steady-state, ctx cancel) or overrun
+	// the deadline by one in-flight op.
+	secs := time.Since(runStart).Seconds()
 	result.Throughput = measure.ThroughputStats{
 		ElapsedS:     secs,
 		BytesRead:    totalBytesRead,
@@ -452,11 +465,15 @@ func (r *Runner) runEpochs(ctx context.Context) []EpochStats {
 		opLat := &measure.Recorder{}
 		epochDur := r.p.Duration / time.Duration(r.p.Epochs)
 		eCtx, cancel := context.WithTimeout(ctx, epochDur)
+		// Measured wall time, not epochDur: the parent ctx can cut an epoch
+		// short, and workers can overrun the deadline by one in-flight op.
+		t0 := time.Now()
 		r.runWorkers(eCtx, tp, ttfb, opLat, &measure.StallTracker{})
+		elapsed := time.Since(t0)
 		cancel()
 		epochs = append(epochs, EpochStats{
 			Epoch:      e + 1,
-			Throughput: tp.Stats(epochDur),
+			Throughput: tp.Stats(elapsed),
 			TTFB:       ttfb.Stats(),
 		})
 	}

@@ -287,6 +287,7 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 	var allSamples []measure.MetricSample
 	var totalGPUStall float64
 	var maxDuration float64
+	var maxElapsed float64
 
 	perNode := make([]workload.NodeResult, len(nodes))
 
@@ -300,6 +301,9 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 		totalGPUStall += r.GPUStallPct
 		if r.DurationS > maxDuration {
 			maxDuration = r.DurationS
+		}
+		if r.Throughput.ElapsedS > maxElapsed {
+			maxElapsed = r.Throughput.ElapsedS
 		}
 		allLatStats = append(allLatStats, r.TTFB)
 		allOpStats = append(allOpStats, r.OpLatency)
@@ -321,7 +325,14 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 		}
 	}
 
-	secs := p.Duration.Seconds()
+	// Nodes ran concurrently, so cluster bandwidth = total bytes over the
+	// longest node measurement window. Use the measured per-node elapsed time
+	// rather than the configured duration, which is wrong when nodes finish
+	// early (steady-state) or overrun by one in-flight op.
+	secs := maxElapsed
+	if secs <= 0 {
+		secs = p.Duration.Seconds()
+	}
 	if secs <= 0 {
 		secs = maxDuration
 	}
