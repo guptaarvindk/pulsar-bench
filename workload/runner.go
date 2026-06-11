@@ -129,6 +129,24 @@ func NewRunner(paths []string, p *profile.Profile, quiet bool) *Runner {
 }
 
 func (r *Runner) Run() (*Result, error) {
+	// Guard: the GPU-stall metric pairs per-batch I/O time with one compute
+	// gap. If a compute gap is configured but no batch size, the whole file
+	// is flushed as a single batch against a single gap and the stall figure
+	// saturates near 100% regardless of storage speed. Apply the same default
+	// as profile.validate() and tell the user.
+	if r.p.ComputeGapMs > 0 && r.p.BatchSizeBytes <= 0 {
+		bs := 16 * r.p.BlockSize
+		if bs < 4<<20 {
+			bs = 4 << 20
+		}
+		r.p.BatchSizeBytes = bs
+		if !r.quiet {
+			fmt.Fprintf(os.Stderr,
+				"warning: compute_gap_ms is set but batch_size_bytes is not; defaulting batch to %s so the GPU-stall metric is meaningful\n",
+				humanBytes(bs))
+		}
+	}
+
 	// Use first path for backwards-compatible Path field
 	result := &Result{
 		Profile:        r.p.Name,
@@ -234,9 +252,15 @@ func (r *Runner) Run() (*Result, error) {
 			if r.steadyState {
 				go watchSteadyState(measCtx, measCancel, sampler)
 			}
+			// Use measured wall time, not the configured duration: steady-state
+			// mode cancels the window early (configured duration would understate
+			// bandwidth) and workers can overrun the deadline by one in-flight op
+			// (configured duration would overstate it).
+			measStart := time.Now()
 			r.runWorkers(measCtx, throughput, ttfb, opLat, stall)
+			elapsed := time.Since(measStart)
 			sampler.Stop()
-			result.Throughput = throughput.Stats(r.p.Duration)
+			result.Throughput = throughput.Stats(elapsed)
 			result.TTFB = ttfb.Stats()
 			result.OpLatency = opLat.Stats()
 			result.GPUStallPct = stall.StallPct()
@@ -248,10 +272,15 @@ func (r *Runner) Run() (*Result, error) {
 	result.DurationS = result.FinishedAt.Sub(result.StartedAt).Seconds()
 
 	// --- Accelerator stats ---
-	if r.p.NumAccelerators > 0 && r.p.SampleSizeBytes > 0 && result.DurationS > 0 {
+	// Samples/sec must be computed over the measurement window only.
+	// DurationS spans the whole Run() including the prepare (file layout)
+	// and warmup phases, which can dominate wall time (e.g. creating 50k
+	// files) and would understate samples/sec by that factor — but the
+	// BytesRead numerator only counts measurement-phase reads.
+	if r.p.NumAccelerators > 0 && r.p.SampleSizeBytes > 0 && result.Throughput.ElapsedS > 0 {
 		result.Accelerator = &AcceleratorStats{
 			NumAccelerators: r.p.NumAccelerators,
-			SamplesPerSec:   float64(result.Throughput.BytesRead) / result.DurationS / float64(r.p.SampleSizeBytes),
+			SamplesPerSec:   float64(result.Throughput.BytesRead) / result.Throughput.ElapsedS / float64(r.p.SampleSizeBytes),
 		}
 	}
 
@@ -284,6 +313,7 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 	}
 
 	var wg sync.WaitGroup
+	runStart := time.Now()
 	for i, pth := range r.paths {
 		wg.Add(1)
 		i, pth := i, pth
@@ -309,12 +339,15 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 			subP.Workers = workersPerPath
 			subRunner.p = &subP
 
+			// Measured wall time, not configured duration (see Run).
+			t0 := time.Now()
 			subRunner.runWorkers(ctx, tp, ttfb, opLat, stall)
+			elapsed := time.Since(t0)
 			sampler.Stop()
 
 			pr := PathResult{
 				Path:       pth,
-				Throughput: tp.Stats(r.p.Duration),
+				Throughput: tp.Stats(elapsed),
 				TTFB:       ttfb.Stats(),
 				OpLatency:  opLat.Stats(),
 				Samples:    sampler.Samples(),
@@ -346,7 +379,10 @@ func (r *Runner) runMultiPath(ctx context.Context, result *Result) {
 		totalReadOps += o.pr.Throughput.ReadOps
 		totalWriteOps += o.pr.Throughput.WriteOps
 	}
-	secs := r.p.Duration.Seconds()
+	// Measured wall time of the whole multi-path phase, not the configured
+	// duration: paths can finish early (steady-state, ctx cancel) or overrun
+	// the deadline by one in-flight op.
+	secs := time.Since(runStart).Seconds()
 	result.Throughput = measure.ThroughputStats{
 		ElapsedS:     secs,
 		BytesRead:    totalBytesRead,
@@ -434,11 +470,15 @@ func (r *Runner) runEpochs(ctx context.Context) []EpochStats {
 		opLat := &measure.Recorder{}
 		epochDur := r.p.Duration / time.Duration(r.p.Epochs)
 		eCtx, cancel := context.WithTimeout(ctx, epochDur)
+		// Measured wall time, not epochDur: the parent ctx can cut an epoch
+		// short, and workers can overrun the deadline by one in-flight op.
+		t0 := time.Now()
 		r.runWorkers(eCtx, tp, ttfb, opLat, &measure.StallTracker{})
+		elapsed := time.Since(t0)
 		cancel()
 		epochs = append(epochs, EpochStats{
 			Epoch:      e + 1,
-			Throughput: tp.Stats(epochDur),
+			Throughput: tp.Stats(elapsed),
 			TTFB:       ttfb.Stats(),
 		})
 	}
@@ -474,12 +514,14 @@ func (r *Runner) runMetadata(
 
 	ss := statOps.Stats()
 	rs := rdOps.Stats()
-	// Infer hit rate: second-access is dramatically faster than first
+	// Infer hit rate: second-access is dramatically faster than first.
+	// Both bounds must be > 0: a zero p25 (clock-resolution-fast cached
+	// stat) made speedup +Inf and the resulting hit rate NaN.
 	var hitRate float64
 	if r.p.Reuse && ss.Count > int64(len(r.files)) {
 		firstHalf := ss.P50Ms
 		secondHalf := ss.P25Ms
-		if firstHalf > 0 {
+		if firstHalf > 0 && secondHalf > 0 {
 			speedup := firstHalf / secondHalf
 			hitRate = min(99, (speedup-1)/speedup*100)
 		}
@@ -641,10 +683,25 @@ func (r *Runner) checkTargets(res *Result) ([]string, int) {
 		fmt.Sprintf("read throughput %.2f GB/s < target %.2f GB/s", res.Throughput.ReadGBps, t.ReadGBps))
 	check(t.WriteGBps > 0 && res.Throughput.WriteGBps < t.WriteGBps,
 		fmt.Sprintf("write throughput %.2f GB/s < target %.2f GB/s", res.Throughput.WriteGBps, t.WriteGBps))
-	check(t.TTFBColdP99Ms > 0 && res.TTFB.P99Ms > t.TTFBColdP99Ms,
-		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBColdP99Ms))
-	check(t.TTFBWarmP99Ms > 0 && res.TTFB.P99Ms > t.TTFBWarmP99Ms && res.Epochs != nil,
-		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBWarmP99Ms))
+	// Cold/warm TTFB must be checked against the matching epoch, not the
+	// merged distribution: merged p99 is dominated by cold-epoch outliers,
+	// so checking it against the (much tighter) warm target produced false
+	// failures, and checking it against the cold target diluted cold opens
+	// with warm ones in multi-epoch runs.
+	ttfbColdP99 := res.TTFB.P99Ms
+	var ttfbWarmP99 float64
+	hasWarm := false
+	if len(res.Epochs) > 0 {
+		ttfbColdP99 = res.Epochs[0].TTFB.P99Ms
+		if len(res.Epochs) > 1 {
+			ttfbWarmP99 = res.Epochs[len(res.Epochs)-1].TTFB.P99Ms
+			hasWarm = true
+		}
+	}
+	check(t.TTFBColdP99Ms > 0 && ttfbColdP99 > t.TTFBColdP99Ms,
+		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", ttfbColdP99, t.TTFBColdP99Ms))
+	check(t.TTFBWarmP99Ms > 0 && hasWarm && ttfbWarmP99 > t.TTFBWarmP99Ms,
+		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", ttfbWarmP99, t.TTFBWarmP99Ms))
 	if res.Metadata != nil {
 		check(t.StatP99Ms > 0 && res.Metadata.StatP99Ms > t.StatP99Ms,
 			fmt.Sprintf("stat p99 %.1fms > target %.0fms", res.Metadata.StatP99Ms, t.StatP99Ms))

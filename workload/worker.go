@@ -20,8 +20,9 @@ type worker struct {
 	p       *profile.Profile
 	id      int
 	rng     *rand.Rand
-	buf     []byte   // primary buffer (iodepth slot 0)
-	bufs    [][]byte // one aligned buffer per iodepth slot — no sharing between goroutines
+	rngs    []*rand.Rand // one RNG per iodepth slot — rand.Rand is not goroutine-safe
+	buf     []byte       // primary buffer (iodepth slot 0)
+	bufs    [][]byte     // one aligned buffer per iodepth slot — no sharing between goroutines
 	verify  bool
 	iodepth int
 }
@@ -38,12 +39,23 @@ func newWorker(kind string, files []string, p *profile.Profile, id int, rng *ran
 	for i := range bufs {
 		bufs[i] = makeAlignedBuf(sz)
 	}
+	// One RNG per iodepth slot, seeded from the worker RNG: sub-goroutines
+	// launched by runWithIODepth run concurrently and rand.Rand is not
+	// goroutine-safe, so they must never share w.rng.
+	var rngs []*rand.Rand
+	if rng != nil {
+		rngs = make([]*rand.Rand, iodepth)
+		for i := range rngs {
+			rngs[i] = rand.New(rand.NewSource(rng.Int63()))
+		}
+	}
 	return &worker{
 		kind:    kind,
 		files:   files,
 		p:       p,
 		id:      id,
 		rng:     rng,
+		rngs:    rngs,
 		buf:     bufs[0],
 		bufs:    bufs,
 		verify:  p.Verify,
@@ -202,7 +214,9 @@ func (w *worker) loopRandomRead(
 			if maxOff <= 0 {
 				maxOff = 0
 			}
-			offset := alignedOffset(w.rng.Int63n(maxOff + 1))
+			// Use the per-slot RNG: with iodepth > 1 this closure runs in
+			// concurrent goroutines and sharing w.rng would be a data race.
+			offset := alignedOffset(w.rngs[subID].Int63n(maxOff + 1))
 
 			t0 := time.Now()
 			f, err := openForRead(path, w.p.DirectIO)
@@ -390,6 +404,11 @@ func (w *worker) loopAgentWorkspace(
 			os.Rename(src, dst)
 			os.Rename(dst, src)
 			ioElapsed = time.Since(t0)
+			// Record rename latency like every other branch — leaving it out
+			// silently dropped ~10% of ops from the op-latency distribution.
+			if opLat != nil {
+				opLat.Record(ioElapsed)
+			}
 		default:
 			t0 := time.Now()
 			f, err := os.Open(dir)

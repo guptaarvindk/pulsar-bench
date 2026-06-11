@@ -106,11 +106,17 @@ func TestCoordinatorCheckTargets_TTFBWarmRequiresEpochs(t *testing.T) {
 	if missed != 0 {
 		t.Errorf("TTFBWarm should not fire without epochs, got %d", missed)
 	}
-	// With epochs — should fire
-	res.Epochs = []workload.EpochStats{{Epoch: 1}}
+	// One cold epoch only — still no warm data, should not fire
+	res.Epochs = []workload.EpochStats{{Epoch: 1, TTFB: measure.LatencyStats{P99Ms: 200}}}
+	_, missed = checkTargets(res, p)
+	if missed != 0 {
+		t.Errorf("TTFBWarm should not fire with only a cold epoch, got %d", missed)
+	}
+	// Warm epoch above target — should fire on the warm epoch's p99
+	res.Epochs = append(res.Epochs, workload.EpochStats{Epoch: 2, TTFB: measure.LatencyStats{P99Ms: 80}})
 	_, missed = checkTargets(res, p)
 	if missed != 1 {
-		t.Errorf("TTFBWarm should fire with epochs, got %d", missed)
+		t.Errorf("TTFBWarm should fire on warm epoch p99 above target, got %d", missed)
 	}
 }
 

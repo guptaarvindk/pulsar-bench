@@ -287,6 +287,7 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 	var allSamples []measure.MetricSample
 	var totalGPUStall float64
 	var maxDuration float64
+	var maxElapsed float64
 
 	perNode := make([]workload.NodeResult, len(nodes))
 
@@ -300,6 +301,9 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 		totalGPUStall += r.GPUStallPct
 		if r.DurationS > maxDuration {
 			maxDuration = r.DurationS
+		}
+		if r.Throughput.ElapsedS > maxElapsed {
+			maxElapsed = r.Throughput.ElapsedS
 		}
 		allLatStats = append(allLatStats, r.TTFB)
 		allOpStats = append(allOpStats, r.OpLatency)
@@ -321,7 +325,14 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 		}
 	}
 
-	secs := p.Duration.Seconds()
+	// Nodes ran concurrently, so cluster bandwidth = total bytes over the
+	// longest node measurement window. Use the measured per-node elapsed time
+	// rather than the configured duration, which is wrong when nodes finish
+	// early (steady-state) or overrun by one in-flight op.
+	secs := maxElapsed
+	if secs <= 0 {
+		secs = p.Duration.Seconds()
+	}
 	if secs <= 0 {
 		secs = maxDuration
 	}
@@ -348,11 +359,14 @@ func mergeResults(nodes []NodeAddr, outcomes []nodeOutcome, p *profile.Profile) 
 	merged.PerNode = perNode
 	merged.Samples = allSamples
 
-	// Accelerator stats
-	if p.NumAccelerators > 0 && p.SampleSizeBytes > 0 && merged.DurationS > 0 {
+	// Accelerator stats — computed over the measurement window (ElapsedS),
+	// not DurationS which includes each node's prepare and warmup phases
+	// and would understate samples/sec (the bytes numerator only counts
+	// measurement-phase reads).
+	if p.NumAccelerators > 0 && p.SampleSizeBytes > 0 && merged.Throughput.ElapsedS > 0 {
 		merged.Accelerator = &workload.AcceleratorStats{
 			NumAccelerators: p.NumAccelerators,
-			SamplesPerSec:   float64(merged.Throughput.BytesRead) / merged.DurationS / float64(p.SampleSizeBytes),
+			SamplesPerSec:   float64(merged.Throughput.BytesRead) / merged.Throughput.ElapsedS / float64(p.SampleSizeBytes),
 		}
 	}
 
@@ -379,10 +393,24 @@ func checkTargets(res *workload.Result, p *profile.Profile) ([]string, int) {
 		fmt.Sprintf("read throughput %.2f GB/s < target %.2f GB/s", res.Throughput.ReadGBps, t.ReadGBps))
 	check(t.WriteGBps > 0 && res.Throughput.WriteGBps < t.WriteGBps,
 		fmt.Sprintf("write throughput %.2f GB/s < target %.2f GB/s", res.Throughput.WriteGBps, t.WriteGBps))
-	check(t.TTFBColdP99Ms > 0 && res.TTFB.P99Ms > t.TTFBColdP99Ms,
-		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBColdP99Ms))
-	check(t.TTFBWarmP99Ms > 0 && res.TTFB.P99Ms > t.TTFBWarmP99Ms && res.Epochs != nil,
-		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", res.TTFB.P99Ms, t.TTFBWarmP99Ms))
+	// Same epoch-aware cold/warm logic as workload.Runner.checkTargets:
+	// merged p99 mixes cold and warm opens, so the warm target must be
+	// checked against the last (warm) epoch and the cold target against
+	// the first epoch when epoch data exists.
+	ttfbColdP99 := res.TTFB.P99Ms
+	var ttfbWarmP99 float64
+	hasWarm := false
+	if len(res.Epochs) > 0 {
+		ttfbColdP99 = res.Epochs[0].TTFB.P99Ms
+		if len(res.Epochs) > 1 {
+			ttfbWarmP99 = res.Epochs[len(res.Epochs)-1].TTFB.P99Ms
+			hasWarm = true
+		}
+	}
+	check(t.TTFBColdP99Ms > 0 && ttfbColdP99 > t.TTFBColdP99Ms,
+		fmt.Sprintf("TTFB cold p99 %.1fms > target %.0fms", ttfbColdP99, t.TTFBColdP99Ms))
+	check(t.TTFBWarmP99Ms > 0 && hasWarm && ttfbWarmP99 > t.TTFBWarmP99Ms,
+		fmt.Sprintf("TTFB warm p99 %.1fms > target %.0fms", ttfbWarmP99, t.TTFBWarmP99Ms))
 	if res.Metadata != nil {
 		check(t.StatP99Ms > 0 && res.Metadata.StatP99Ms > t.StatP99Ms,
 			fmt.Sprintf("stat p99 %.1fms > target %.0fms", res.Metadata.StatP99Ms, t.StatP99Ms))

@@ -77,11 +77,27 @@ func TestCheckTargets_TTFBWarmMissRequiresEpochs(t *testing.T) {
 		t.Errorf("TTFBWarmP99Ms should not fire without epochs, got %d violations", missed)
 	}
 
-	// With epochs → should fire
-	res.Epochs = []EpochStats{{Epoch: 1}}
+	// A single (cold-only) epoch → still no warm data, must not fire even
+	// though the merged p99 (cold-dominated) exceeds the warm target.
+	res.Epochs = []EpochStats{{Epoch: 1, TTFB: measure.LatencyStats{P99Ms: 200}}}
+	_, missed = r.checkTargets(res)
+	if missed != 0 {
+		t.Errorf("TTFBWarmP99Ms should not fire with only a cold epoch, got %d violations", missed)
+	}
+
+	// Warm epoch above target → should fire, judged on the warm epoch's
+	// own p99, not the cold-contaminated merged distribution.
+	res.Epochs = append(res.Epochs, EpochStats{Epoch: 2, TTFB: measure.LatencyStats{P99Ms: 80}})
 	_, missed = r.checkTargets(res)
 	if missed != 1 {
-		t.Errorf("TTFBWarmP99Ms should fire with epochs, got %d violations", missed)
+		t.Errorf("TTFBWarmP99Ms should fire on warm epoch p99 above target, got %d violations", missed)
+	}
+
+	// Warm epoch within target → must pass even though merged p99 is high.
+	res.Epochs[1].TTFB.P99Ms = 20
+	_, missed = r.checkTargets(res)
+	if missed != 0 {
+		t.Errorf("TTFBWarmP99Ms should not fire when warm epoch meets target, got %d violations", missed)
 	}
 }
 

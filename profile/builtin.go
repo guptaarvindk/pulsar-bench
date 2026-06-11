@@ -44,7 +44,14 @@ func llmInference() Profile {
 		DirectIO:     true,                                         // bypass page cache on Linux
 		Reuse:        true,                                         // same shards hit on every inference
 		ComputeGapMs: 100,                                          // 100ms ≈ GPU time per token batch
-		Cleanup:      true,
+		// One "batch" = the weight slab fetched per token-generation step
+		// (a transformer layer is tens of MB). 32 MiB ≈ 8 reads at the 4 MiB
+		// block size; at the 1 GB/s target that is ~32ms of I/O per 100ms
+		// compute step (~24% stall). Without an explicit batch size the whole
+		// 10 GB file accumulated as ONE batch against ONE 100ms gap and the
+		// stall metric saturated near 100% regardless of storage speed.
+		BatchSizeBytes: 32 << 20,
+		Cleanup:        true,
 		Targets: TargetConfig{
 			TTFBColdP99Ms: 500,
 			TTFBWarmP99Ms: 50,
@@ -71,7 +78,12 @@ func training() Profile {
 		DirectIO:     true,                                         // bypass page cache on Linux
 		Reuse:        false,                                        // each shard read once per epoch
 		ComputeGapMs: 50,                                           // 50ms ≈ GPU forward pass per batch
-		Cleanup:      true,
+		// One DataLoader batch ≈ 32 shard records × 256 KiB = 8 MiB per GPU
+		// step. At the 1 GB/s target that is ~8ms of I/O per 50ms compute
+		// step (~14% stall). Required for a meaningful stall metric: with no
+		// batch size the entire 1 GB shard was charged against one 50ms gap.
+		BatchSizeBytes: 8 << 20,
+		Cleanup:        true,
 		Targets: TargetConfig{
 			ReadGBps:      1.0,
 			TTFBColdP99Ms: 500,
@@ -98,7 +110,12 @@ func multiEpoch() Profile {
 		DirectIO:     true,                                         // bypass page cache on Linux
 		Reuse:        true,
 		ComputeGapMs: 75,                                           // 75ms ≈ GPU time between epoch passes
-		Cleanup:      true,
+		// Same DataLoader model as the training profile: ~8 MiB read per GPU
+		// step (32 × 256 KiB records). At the 1 GB/s target that is ~8ms I/O
+		// per 75ms compute step (~10% stall), leaving headroom to expose the
+		// cold-epoch penalty without saturating the metric.
+		BatchSizeBytes: 8 << 20,
+		Cleanup:        true,
 		Targets: TargetConfig{
 			TTFBColdP99Ms: 1000,
 			TTFBWarmP99Ms: 50,
