@@ -514,12 +514,14 @@ func (r *Runner) runMetadata(
 
 	ss := statOps.Stats()
 	rs := rdOps.Stats()
-	// Infer hit rate: second-access is dramatically faster than first
+	// Infer hit rate: second-access is dramatically faster than first.
+	// Both bounds must be > 0: a zero p25 (clock-resolution-fast cached
+	// stat) made speedup +Inf and the resulting hit rate NaN.
 	var hitRate float64
 	if r.p.Reuse && ss.Count > int64(len(r.files)) {
 		firstHalf := ss.P50Ms
 		secondHalf := ss.P25Ms
-		if firstHalf > 0 {
+		if firstHalf > 0 && secondHalf > 0 {
 			speedup := firstHalf / secondHalf
 			hitRate = min(99, (speedup-1)/speedup*100)
 		}
